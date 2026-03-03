@@ -196,10 +196,13 @@ def execute_tool(tool_name: str, tool_input: dict, job_context: dict) -> str:
         if tool_name == "extract_pdf_text":
             pdf_path = old_pdf if tool_input["pdf_id"] == "old" else new_pdf
             result = pdf_utils.extract_full_text(pdf_path)
-            # Truncate page texts for token efficiency
+            # Aggressively truncate — only return first 500 chars per page
+            # Agent should use extract_pdf_page for detailed reading
             for p in result["pages"]:
-                if len(p["text"]) > 2000:
-                    p["text"] = p["text"][:2000] + f"\n... [truncated, {p['char_count']} total chars]"
+                if len(p["text"]) > 500:
+                    p["text"] = p["text"][:500] + f"\n... [truncated, use extract_pdf_page for full text]"
+            # Drop full_text to save tokens
+            result.pop("full_text", None)
             return json.dumps(result)
 
         elif tool_name == "extract_pdf_page":
@@ -225,10 +228,14 @@ def execute_tool(tool_name: str, tool_input: dict, job_context: dict) -> str:
         elif tool_name == "diff_sections":
             section_map = tool_input.get("section_map")
             result = pdf_utils.diff_sections(old_pdf, new_pdf, section_map)
-            # Truncate large diffs
+            # Aggressively truncate diffs and text previews
             for d in result["diffs"]:
-                if "diff_preview" in d and len(d["diff_preview"]) > 1000:
-                    d["diff_preview"] = d["diff_preview"][:1000] + "\n..."
+                if "diff_preview" in d and len(d["diff_preview"]) > 600:
+                    d["diff_preview"] = d["diff_preview"][:600] + "\n..."
+                if "old_text_preview" in d and len(d["old_text_preview"]) > 300:
+                    d["old_text_preview"] = d["old_text_preview"][:300] + "..."
+                if "new_text_preview" in d and len(d["new_text_preview"]) > 300:
+                    d["new_text_preview"] = d["new_text_preview"][:300] + "..."
             return json.dumps(result)
 
         elif tool_name == "report_progress":

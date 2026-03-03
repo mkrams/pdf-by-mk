@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import type { AnalysisResult, ProgressEvent } from '../types';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -8,57 +8,122 @@ export function useAnalysis(jobId: string | null) {
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [isComplete, setIsComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const esRef = useRef<EventSource | null>(null);
+  // Use refs for poll interval to avoid stale closures
+  const isCompleteRef = useRef(false);
+  const errorRef = useRef<string | null>(null);
+
+  // Keep refs in sync with state
+  useEffect(() => { isCompleteRef.current = isComplete; }, [isComplete]);
+  useEffect(() => { errorRef.current = error; }, [error]);
+
+  const fetchResult = useCallback(async (id: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`${API}/api/analyze/${id}/result`);
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (data.status === 'completed') {
+        setResult(data);
+        setIsComplete(true);
+        return true;
+      } else if (data.status === 'failed') {
+        setError(data.error || 'Analysis failed');
+        setIsComplete(true);  // Mark complete so we don't show progress bar
+        return true;
+      }
+    } catch {
+      // Network error — don't set error state, just return false
+    }
+    return false;
+  }, []);
 
   useEffect(() => {
     if (!jobId) return;
 
-    const es = new EventSource(`${API}/api/analyze/${jobId}/progress`);
+    let cancelled = false;
 
-    es.addEventListener('progress', (e) => {
-      const data = JSON.parse(e.data) as ProgressEvent;
-      setProgress((prev) => [...prev, data]);
-    });
+    // First check if result already exists (tab reopened / analysis done)
+    fetchResult(jobId).then(done => {
+      if (cancelled) return;
+      if (done) {
+        // Already finished — don't connect SSE at all
+        return;
+      }
 
-    es.addEventListener('complete', async (e) => {
-      const data = JSON.parse(e.data);
-      setProgress((prev) => [...prev, { stage: 'complete', percent: 100, message: data.message || 'Complete' }]);
-      es.close();
+      // Not finished yet — connect SSE for live progress
+      const es = new EventSource(`${API}/api/analyze/${jobId}/progress`);
+      esRef.current = es;
 
-      // Fetch full result
-      try {
-        const res = await fetch(`${API}/api/analyze/${jobId}/result`);
-        if (res.ok) {
-          const resultData = await res.json();
-          setResult(resultData);
+      es.addEventListener('progress', (e) => {
+        if (cancelled) return;
+        try {
+          const data = JSON.parse(e.data) as ProgressEvent;
+          setProgress((prev) => [...prev, data]);
+        } catch {}
+      });
+
+      es.addEventListener('complete', async (e) => {
+        if (cancelled) return;
+        try {
+          const data = JSON.parse(e.data);
+          setProgress((prev) => [...prev, {
+            stage: 'complete', percent: 100,
+            message: data.message || `Complete: ${data.total_changes || 0} changes found`,
+          }]);
+        } catch {}
+        es.close();
+        esRef.current = null;
+        // Fetch the full result
+        await fetchResult(jobId);
+      });
+
+      // Listen for "failed" named event (backend sends event: failed)
+      es.addEventListener('failed', (e) => {
+        if (cancelled) return;
+        try {
+          const data = JSON.parse(e.data);
+          setError(data.error || 'Analysis failed');
           setIsComplete(true);
-        } else {
-          setError('Failed to fetch results');
+        } catch {
+          setError('Analysis failed');
+          setIsComplete(true);
         }
-      } catch (err) {
-        setError(String(err));
-      }
+        es.close();
+        esRef.current = null;
+      });
+
+      // Built-in error handler — fires on network issues or when server closes
+      es.addEventListener('error', () => {
+        if (cancelled) return;
+        if (es.readyState === EventSource.CLOSED) {
+          // Connection was closed by server — try fetching result
+          fetchResult(jobId);
+        }
+        // If CONNECTING, EventSource will auto-reconnect (that's fine)
+      });
     });
 
-    es.addEventListener('error', (e) => {
-      // Check if it's a real error or just SSE reconnect
-      if (es.readyState === EventSource.CLOSED) {
-        // Might be done - try fetching result
-        fetch(`${API}/api/analyze/${jobId}/result`)
-          .then(r => r.json())
-          .then(data => {
-            if (data.status === 'completed') {
-              setResult(data);
-              setIsComplete(true);
-            } else if (data.status === 'failed') {
-              setError(data.error || 'Analysis failed');
-            }
-          })
-          .catch(() => {});
+    // Poll every 8s as fallback (handles tab reopen, SSE drops)
+    const poll = setInterval(() => {
+      // Use refs to avoid stale closure
+      if (!isCompleteRef.current && !errorRef.current) {
+        fetchResult(jobId).then(done => {
+          if (done && esRef.current) {
+            // If poll found it's done, close SSE
+            esRef.current.close();
+            esRef.current = null;
+          }
+        });
       }
-    });
+    }, 8000);
 
-    return () => es.close();
-  }, [jobId]);
+    return () => {
+      cancelled = true;
+      esRef.current?.close();
+      esRef.current = null;
+      clearInterval(poll);
+    };
+  }, [jobId, fetchResult]);
 
   return { progress, result, isComplete, error };
 }

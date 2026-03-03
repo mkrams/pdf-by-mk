@@ -24,15 +24,23 @@ function Badge({ text, colors }: { text: string; colors: string }) {
 
 // ── Progress Monitor ─────────────────────────────────────────────
 
-function ProgressMonitor({ events }: { events: ProgressEvent[] }) {
+function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: string | null }) {
   const latest = events[events.length - 1];
   const pct = latest?.percent || 0;
   const [elapsed, setElapsed] = useState(0);
+  const logRef = React.useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const t = setInterval(() => setElapsed(e => e + 1), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // Auto-scroll log to bottom
+  useEffect(() => {
+    if (logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  }, [events]);
 
   const mins = Math.floor(elapsed / 60);
   const secs = elapsed % 60;
@@ -44,46 +52,75 @@ function ProgressMonitor({ events }: { events: ProgressEvent[] }) {
   const maxTurns = turnMatch ? parseInt(turnMatch[2]) : 15;
   const tokens = tokenMatch ? tokenMatch[1] : '0';
 
+  // Pulse animation when no events for a while
+  const isStale = events.length > 0 && elapsed > 5 && !error;
+
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-8 bg-slate-900 text-white">
       <div className="max-w-lg w-full">
-        <h2 className="text-2xl font-bold mb-2 text-center">Analyzing Documents...</h2>
-        <p className="text-slate-400 text-xs text-center mb-6">You can close this tab — analysis continues on the server</p>
-
-        {/* Stats bar */}
-        <div className="flex justify-center gap-6 mb-6">
-          <div className="text-center">
-            <div className="text-2xl font-mono font-bold text-blue-400">{mins}:{secs.toString().padStart(2, '0')}</div>
-            <div className="text-[10px] text-slate-500 uppercase tracking-wider">Elapsed</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-mono font-bold text-emerald-400">{currentTurn}<span className="text-slate-600">/{maxTurns}</span></div>
-            <div className="text-[10px] text-slate-500 uppercase tracking-wider">AI Turns</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-mono font-bold text-amber-400">{tokens}</div>
-            <div className="text-[10px] text-slate-500 uppercase tracking-wider">Tokens</div>
-          </div>
-        </div>
-
-        {/* Progress bar */}
-        <div className="w-full bg-slate-700 rounded-full h-2.5 mb-3">
-          <div className="bg-blue-500 h-2.5 rounded-full transition-all duration-700 ease-out" style={{ width: `${pct}%` }} />
-        </div>
-        <div className="text-center text-slate-400 text-xs mb-6">
-          {latest?.message?.replace(/^\[[\d:]+\]\s*Turn \d+\/\d+\s*\|\s*[\d,]+ tokens\s*\|\s*/, '') || 'Starting...'}
-        </div>
-
-        {/* Event log */}
-        <div className="bg-slate-800/60 rounded-lg p-3 max-h-48 overflow-y-auto border border-slate-700">
-          {events.map((ev, i) => (
-            <div key={i} className="text-[11px] text-slate-400 py-0.5 font-mono flex gap-2">
-              <span className="text-blue-500/60 min-w-[3ch] text-right">{ev.percent}%</span>
-              <span className="text-slate-500">│</span>
-              <span>{ev.message}</span>
+        {error ? (
+          <>
+            <div className="text-center mb-6">
+              <div className="text-4xl mb-3">⚠️</div>
+              <h2 className="text-xl font-bold text-red-400 mb-2">Analysis Failed</h2>
+              <p className="text-slate-400 text-sm mb-4 max-w-sm mx-auto break-words">{error}</p>
+              <button onClick={() => window.location.href = '/'}
+                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium">
+                Try Again
+              </button>
             </div>
-          ))}
-        </div>
+            {events.length > 0 && (
+              <div ref={logRef} className="bg-slate-800/60 rounded-lg p-3 max-h-32 overflow-y-auto border border-slate-700">
+                {events.map((ev, i) => (
+                  <div key={i} className="text-[11px] text-slate-500 py-0.5 font-mono">{ev.message}</div>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <h2 className="text-2xl font-bold mb-2 text-center">Analyzing Documents...</h2>
+            <p className="text-slate-400 text-xs text-center mb-6">You can close this tab — analysis continues on the server</p>
+
+            {/* Stats bar */}
+            <div className="flex justify-center gap-6 mb-6">
+              <div className="text-center">
+                <div className="text-2xl font-mono font-bold text-blue-400">{mins}:{secs.toString().padStart(2, '0')}</div>
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider">Elapsed</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-mono font-bold text-emerald-400">{currentTurn}<span className="text-slate-600">/{maxTurns}</span></div>
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider">AI Turns</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-mono font-bold text-amber-400">{tokens}</div>
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider">Tokens</div>
+              </div>
+            </div>
+
+            {/* Progress bar */}
+            <div className="w-full bg-slate-700 rounded-full h-2.5 mb-3">
+              <div className={`bg-blue-500 h-2.5 rounded-full transition-all duration-700 ease-out ${isStale && pct < 100 ? 'animate-pulse' : ''}`}
+                style={{ width: `${Math.max(pct, 2)}%` }} />
+            </div>
+            <div className="text-center text-slate-400 text-xs mb-6">
+              {latest?.message?.replace(/^\[[\d:]+\]\s*Turn \d+\/\d+\s*\|\s*[\d,]+ tokens\s*\|\s*/, '') || 'Connecting...'}
+            </div>
+
+            {/* Event log */}
+            <div ref={logRef} className="bg-slate-800/60 rounded-lg p-3 max-h-48 overflow-y-auto border border-slate-700">
+              {events.length === 0 ? (
+                <div className="text-[11px] text-slate-500 py-0.5 font-mono animate-pulse">Waiting for agent...</div>
+              ) : events.map((ev, i) => (
+                <div key={i} className="text-[11px] text-slate-400 py-0.5 font-mono flex gap-2">
+                  <span className="text-blue-500/60 min-w-[3ch] text-right">{ev.percent}%</span>
+                  <span className="text-slate-500">│</span>
+                  <span>{ev.message}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -339,11 +376,8 @@ export default function ViewerPage() {
       </div>
 
       {/* Main content */}
-      {!isComplete ? (
-        <ProgressMonitor events={progress} />
-      ) : error ? (
-        <div className="flex-1 flex items-center justify-center text-red-500 p-8">{error}</div>
-      ) : result ? (
+      {result ? (
+        /* Analysis complete with results — show the 3-panel viewer */
         <div className="flex flex-1 overflow-hidden bg-white dark:bg-gray-950">
           <ChangeList
             changes={result.changes}
@@ -356,8 +390,23 @@ export default function ViewerPage() {
           <ChangeDetail change={selectedChange} jobId={jobId} onViewPdf={handleViewPdf} />
           <PdfViewer jobId={jobId} activeTab={pdfTab} page={pdfPage} onTabChange={setPdfTab} />
         </div>
+      ) : isComplete && error ? (
+        /* Failed — show error in progress monitor */
+        <ProgressMonitor events={progress} error={error} />
+      ) : isComplete ? (
+        /* Complete but no result (shouldn't happen, fallback) */
+        <div className="flex-1 flex items-center justify-center text-gray-400">
+          <div className="text-center">
+            <p className="mb-2">Analysis complete but no results available.</p>
+            <button onClick={() => window.location.href = '/'}
+              className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm">
+              Start New Analysis
+            </button>
+          </div>
+        </div>
       ) : (
-        <div className="flex-1 flex items-center justify-center text-gray-400">Loading...</div>
+        /* Still processing — show progress monitor */
+        <ProgressMonitor events={progress} error={error} />
       )}
     </div>
   );

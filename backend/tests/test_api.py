@@ -99,8 +99,8 @@ class TestResultEndpoint:
         resp = upload_pair(client, pdf_bytes)
         job_id = resp.json()["job_id"]
         result_resp = client.get(f"/api/analyze/{job_id}/result")
-        # Should be 202 (still processing) or 500 (failed because no API key)
-        assert result_resp.status_code in (202, 500)
+        # Should be 202 (still processing) or 200 (failed — returns 200 with error JSON)
+        assert result_resp.status_code in (200, 202)
 
 
 class TestPdfDownload:

@@ -30,7 +30,8 @@ class TestExecuteTool:
         ctx = {"old_pdf_path": tiny_pdf, "new_pdf_path": tiny_pdf}
         result = json.loads(execute_tool("extract_pdf_text", {"pdf_id": "old"}, ctx))
         assert result["total_pages"] == 1
-        assert "Introduction" in result["full_text"]
+        assert "full_text" not in result  # Stripped to save tokens
+        assert "Introduction" in result["pages"][0]["text"]
 
     def test_extract_pdf_page(self, tiny_pdf):
         ctx = {"old_pdf_path": tiny_pdf, "new_pdf_path": tiny_pdf}

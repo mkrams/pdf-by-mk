@@ -12,7 +12,7 @@ from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 
 from .config import CORS_ORIGINS, UPLOAD_DIR, MAX_FILE_SIZE, JOB_EXPIRY_SECONDS
 from .agent import run_analysis
@@ -26,6 +26,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # ── JOB STORAGE (in-memory) ────────────────────────────────────────
@@ -59,7 +60,7 @@ async def health():
 
 
 @app.post("/api/analyze")
-async def start_analysis(
+async def start_analysis_endpoint(
     old_pdf: UploadFile = File(...),
     new_pdf: UploadFile = File(...),
     old_label: str = Form("Old Version"),
@@ -109,7 +110,7 @@ async def start_analysis(
 
     progress_queues[job_id] = asyncio.Queue()
 
-    # Start analysis in background
+    # Start analysis in background — runs in the main event loop (no thread)
     asyncio.create_task(_run_job(job_id, old_path, new_path, old_label, new_label, api_key or ""))
 
     return {
@@ -128,27 +129,25 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
             await progress_queues[job_id].put(event_dict)
 
     try:
-        result = await asyncio.to_thread(
-            _run_sync_analysis, job_id, old_path, new_path, old_label, new_label, api_key, progress_cb
+        result = await run_analysis(
+            job_id, old_path, new_path, old_label, new_label, api_key, progress_cb
         )
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["result"] = result
+
+        # Signal completion through queue
+        if job_id in progress_queues:
+            await progress_queues[job_id].put({
+                "stage": "complete", "percent": 100,
+                "message": f"Analysis complete: {result['total_changes']} changes found",
+            })
     except Exception as e:
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(e)
         if job_id in progress_queues:
-            await progress_queues[job_id].put({"stage": "error", "percent": 0, "message": str(e)})
-
-
-def _run_sync_analysis(job_id, old_path, new_path, old_label, new_label, api_key, progress_cb):
-    """Wrapper to run async agent in a sync context (for asyncio.to_thread)."""
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(
-            run_analysis(job_id, old_path, new_path, old_label, new_label, api_key, progress_cb)
-        )
-    finally:
-        loop.close()
+            await progress_queues[job_id].put({
+                "stage": "failed", "percent": 0, "message": str(e),
+            })
 
 
 @app.get("/api/analyze/{job_id}/progress")
@@ -162,10 +161,14 @@ async def stream_progress(job_id: str):
         for event in jobs[job_id].get("progress", []):
             yield f"event: progress\ndata: {json.dumps(event)}\n\n"
 
-        # If already done, send complete
-        if jobs[job_id]["status"] in ("completed", "failed"):
-            status = jobs[job_id]["status"]
-            yield f"event: {status}\ndata: {json.dumps({'status': status})}\n\n"
+        # If already done, send final event and close
+        status = jobs[job_id]["status"]
+        if status == "completed":
+            result = jobs[job_id].get("result", {})
+            yield f"event: complete\ndata: {json.dumps({'status': 'completed', 'total_changes': result.get('total_changes', 0)})}\n\n"
+            return
+        elif status == "failed":
+            yield f"event: failed\ndata: {json.dumps({'status': 'failed', 'error': jobs[job_id].get('error', 'Unknown error')})}\n\n"
             return
 
         # Listen for new events
@@ -175,17 +178,38 @@ async def stream_progress(job_id: str):
 
         while True:
             try:
-                event = await asyncio.wait_for(queue.get(), timeout=60)
+                event = await asyncio.wait_for(queue.get(), timeout=30)
                 stage = event.get("stage", "")
-                if stage == "complete" or stage == "error":
-                    yield f"event: {stage}\ndata: {json.dumps(event)}\n\n"
+                if stage == "complete":
+                    yield f"event: complete\ndata: {json.dumps(event)}\n\n"
                     break
-                yield f"event: progress\ndata: {json.dumps(event)}\n\n"
+                elif stage == "failed":
+                    yield f"event: failed\ndata: {json.dumps(event)}\n\n"
+                    break
+                else:
+                    yield f"event: progress\ndata: {json.dumps(event)}\n\n"
             except asyncio.TimeoutError:
-                # Send keepalive
+                # Send keepalive comment (not an event)
                 yield f": keepalive\n\n"
+                # Check if job finished while we were waiting
+                if jobs[job_id]["status"] in ("completed", "failed"):
+                    status = jobs[job_id]["status"]
+                    if status == "completed":
+                        result = jobs[job_id].get("result", {})
+                        yield f"event: complete\ndata: {json.dumps({'status': 'completed', 'total_changes': result.get('total_changes', 0)})}\n\n"
+                    else:
+                        yield f"event: failed\ndata: {json.dumps({'status': 'failed', 'error': jobs[job_id].get('error', '')})}\n\n"
+                    break
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/analyze/{job_id}/result")
@@ -199,7 +223,7 @@ async def get_result(job_id: str):
         return JSONResponse({"status": "processing", "progress": job["progress"]}, status_code=202)
 
     if job["status"] == "failed":
-        return JSONResponse({"status": "failed", "error": job["error"]}, status_code=500)
+        return JSONResponse({"status": "failed", "error": job["error"]}, status_code=200)
 
     result = job["result"]
     return {
@@ -217,8 +241,8 @@ async def get_result(job_id: str):
 
 
 @app.get("/api/analyze/{job_id}/pdf/{which}")
-async def download_pdf(job_id: str, which: str):
-    """Download annotated PDF."""
+async def serve_pdf(job_id: str, which: str):
+    """Serve annotated PDF inline in browser."""
     if job_id not in jobs:
         raise HTTPException(404, "Job not found")
 
@@ -239,4 +263,15 @@ async def download_pdf(job_id: str, which: str):
     if not path or not os.path.exists(path):
         raise HTTPException(404, "Annotated PDF not found")
 
-    return FileResponse(path, filename=filename, media_type="application/pdf")
+    # Read file and return with inline Content-Disposition
+    with open(path, "rb") as f:
+        pdf_bytes = f.read()
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Content-Length": str(len(pdf_bytes)),
+        },
+    )

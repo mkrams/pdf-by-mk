@@ -1,6 +1,9 @@
 """
 Claude agent orchestrator. Runs an agentic tool-calling loop to
 analyze two PDFs and produce a verified change register.
+
+Uses AsyncAnthropic so all I/O is non-blocking and the FastAPI
+event loop stays responsive (SSE, health checks, etc.).
 """
 import asyncio
 import json
@@ -59,6 +62,41 @@ search_old (snippet for annotation), search_new (snippet for annotation)
 """
 
 MAX_AGENT_TURNS = 15
+JOB_TIMEOUT_SECONDS = 300  # 5 minute hard timeout
+MAX_RETRIES = 3
+RETRY_BACKOFF = [5, 15, 30]  # seconds to wait between retries
+
+
+async def _call_claude_with_retry(client, model, system, tools, messages, max_tokens):
+    """Call Claude API with automatic retry on rate limits and transient errors.
+
+    Uses the async client so we don't block the event loop.
+    """
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            return await client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system,
+                tools=tools,
+                messages=messages,
+            )
+        except anthropic.RateLimitError as e:
+            last_error = e
+            if attempt < MAX_RETRIES - 1:
+                wait = RETRY_BACKOFF[attempt]
+                await asyncio.sleep(wait)
+            else:
+                raise
+        except anthropic.APIStatusError as e:
+            if e.status_code >= 500 and attempt < MAX_RETRIES - 1:
+                last_error = e
+                wait = RETRY_BACKOFF[attempt]
+                await asyncio.sleep(wait)
+            else:
+                raise
+    raise last_error
 
 
 async def run_analysis(
@@ -76,7 +114,8 @@ async def run_analysis(
     if not effective_key:
         raise ValueError("No Anthropic API key provided")
 
-    client = anthropic.Anthropic(api_key=effective_key)
+    # Use AsyncAnthropic so API calls don't block the event loop
+    client = anthropic.AsyncAnthropic(api_key=effective_key)
 
     job_context = {
         "old_pdf_path": old_pdf_path,
@@ -93,7 +132,10 @@ async def run_analysis(
         if progress_callback:
             elapsed = int(time.time() - start_time)
             mins, secs = divmod(elapsed, 60)
-            detail = f"[{mins}:{secs:02d}] Turn {turn}/{MAX_AGENT_TURNS} | {total_input_tokens + total_output_tokens:,} tokens | {message}"
+            detail = (
+                f"[{mins}:{secs:02d}] Turn {turn}/{MAX_AGENT_TURNS} | "
+                f"{total_input_tokens + total_output_tokens:,} tokens | {message}"
+            )
             await progress_callback(ProgressEvent(
                 stage=stage, percent=percent, message=detail,
                 timestamp=datetime.utcnow().isoformat(),
@@ -115,14 +157,20 @@ async def run_analysis(
     for turn in range(MAX_AGENT_TURNS):
         turn_num = turn + 1
 
+        # Hard timeout check
+        if time.time() - start_time > JOB_TIMEOUT_SECONDS:
+            await emit("timeout", 80, "Timeout reached — finalizing with current data", turn_num)
+            break
+
         try:
-            response = client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=16384,
-                system=SYSTEM_PROMPT,
-                tools=TOOL_DEFINITIONS,
-                messages=messages,
+            response = await _call_claude_with_retry(
+                client, CLAUDE_MODEL, SYSTEM_PROMPT,
+                TOOL_DEFINITIONS, messages, 16384,
             )
+        except anthropic.RateLimitError as e:
+            await emit("rate_limited", 0,
+                f"Rate limited after {MAX_RETRIES} retries. Try again in a minute.", turn_num)
+            raise
         except Exception as e:
             await emit("error", 0, f"Claude API error: {str(e)}", turn_num)
             raise
@@ -144,6 +192,7 @@ async def run_analysis(
             break
 
         # Process ALL tool calls and return results together
+        # Run tool execution in a thread to avoid blocking on CPU-bound PDF ops
         tool_results = []
         tool_names = []
         for block in tool_use_blocks:
@@ -154,7 +203,10 @@ async def run_analysis(
             if tool_name == "report_progress":
                 result_str = json.dumps({"status": "reported"})
             else:
-                result_str = execute_tool(tool_name, tool_input, job_context)
+                # execute_tool is CPU-bound (PDF parsing), run in thread
+                result_str = await asyncio.to_thread(
+                    execute_tool, tool_name, tool_input, job_context
+                )
 
             tool_results.append({
                 "type": "tool_result",
@@ -170,7 +222,7 @@ async def run_analysis(
         if tools_str:
             await emit("working", pct, f"Called: {tools_str}", turn_num)
 
-    # Post-process: build annotated PDFs
+    # Post-process: build annotated PDFs (CPU-bound, run in thread)
     await emit("annotating", 88, "Generating annotated PDFs...", MAX_AGENT_TURNS)
 
     changes = job_context.get("submitted_changes") or []
@@ -185,15 +237,17 @@ async def run_analysis(
         if c.get("search_new"):
             new_annotations.append({"change_id": i + 1, "search_text": c["search_new"]})
 
-    # Generate annotated PDFs
+    # Generate annotated PDFs in threads (CPU-bound)
     job_dir = os.path.dirname(old_pdf_path)
     old_ann_path = os.path.join(job_dir, "old_annotated.pdf")
     new_ann_path = os.path.join(job_dir, "new_annotated.pdf")
 
-    old_result = annotate_pdf(old_pdf_path, old_ann_path, old_annotations)
-    new_result = annotate_pdf(new_pdf_path, new_ann_path, new_annotations)
+    old_result = await asyncio.to_thread(annotate_pdf, old_pdf_path, old_ann_path, old_annotations)
+    new_result = await asyncio.to_thread(annotate_pdf, new_pdf_path, new_ann_path, new_annotations)
 
-    await emit("annotating", 95, f"Annotated {old_result['highlights']} + {new_result['highlights']} passages", MAX_AGENT_TURNS)
+    await emit("annotating", 95,
+        f"Annotated {old_result['highlights']} + {new_result['highlights']} passages",
+        MAX_AGENT_TURNS)
 
     # Build final change items with page numbers
     final_changes = []
