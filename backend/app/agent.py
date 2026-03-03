@@ -126,35 +126,41 @@ async def run_analysis(
         assistant_content = response.content
         messages.append({"role": "assistant", "content": assistant_content})
 
-        if response.stop_reason == "end_turn":
+        # Check if there are any tool_use blocks that need responses
+        tool_use_blocks = [b for b in assistant_content if b.type == "tool_use"]
+
+        if not tool_use_blocks:
+            # No tools called — agent is done
             await emit("agent_done", 85, "Agent finished analysis")
             break
 
-        if response.stop_reason == "tool_use":
-            tool_results = []
-            for block in assistant_content:
-                if block.type == "tool_use":
-                    tool_name = block.name
-                    tool_input = block.input
+        # Process ALL tool calls and return results together
+        tool_results = []
+        for block in tool_use_blocks:
+            tool_name = block.name
+            tool_input = block.input
 
-                    # Handle progress reporting
-                    if tool_name == "report_progress":
-                        await emit(
-                            tool_input.get("stage", "working"),
-                            tool_input.get("percent", 0),
-                            tool_input.get("message", ""),
-                        )
-                        result_str = json.dumps({"status": "reported"})
-                    else:
-                        result_str = execute_tool(tool_name, tool_input, job_context)
+            # Handle progress reporting
+            if tool_name == "report_progress":
+                await emit(
+                    tool_input.get("stage", "working"),
+                    tool_input.get("percent", 0),
+                    tool_input.get("message", ""),
+                )
+                result_str = json.dumps({"status": "reported"})
+            else:
+                result_str = execute_tool(tool_name, tool_input, job_context)
 
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result_str,
-                    })
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": result_str,
+            })
 
-            messages.append({"role": "user", "content": tool_results})
+        messages.append({"role": "user", "content": tool_results})
+
+        # If stop_reason was end_turn but had tool calls, we processed them above
+        # and will continue the loop. If no more tools needed, next turn will break.
 
     # Post-process: build annotated PDFs
     await emit("annotating", 88, "Generating annotated PDFs...")
