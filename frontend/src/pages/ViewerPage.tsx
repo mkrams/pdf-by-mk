@@ -27,18 +27,59 @@ function Badge({ text, colors }: { text: string; colors: string }) {
 function ProgressMonitor({ events }: { events: ProgressEvent[] }) {
   const latest = events[events.length - 1];
   const pct = latest?.percent || 0;
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const t = setInterval(() => setElapsed(e => e + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+
+  // Parse turn/token info from latest message (format: "[0:12] Turn 3/15 | 12,345 tokens | ...")
+  const turnMatch = latest?.message?.match(/Turn (\d+)\/(\d+)/);
+  const tokenMatch = latest?.message?.match(/([\d,]+) tokens/);
+  const currentTurn = turnMatch ? parseInt(turnMatch[1]) : 0;
+  const maxTurns = turnMatch ? parseInt(turnMatch[2]) : 15;
+  const tokens = tokenMatch ? tokenMatch[1] : '0';
+
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-8 bg-slate-900 text-white">
-      <div className="max-w-md w-full">
-        <h2 className="text-2xl font-bold mb-6 text-center">Analyzing Documents...</h2>
-        <div className="w-full bg-slate-700 rounded-full h-3 mb-4">
-          <div className="bg-blue-500 h-3 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
+      <div className="max-w-lg w-full">
+        <h2 className="text-2xl font-bold mb-2 text-center">Analyzing Documents...</h2>
+        <p className="text-slate-400 text-xs text-center mb-6">You can close this tab — analysis continues on the server</p>
+
+        {/* Stats bar */}
+        <div className="flex justify-center gap-6 mb-6">
+          <div className="text-center">
+            <div className="text-2xl font-mono font-bold text-blue-400">{mins}:{secs.toString().padStart(2, '0')}</div>
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider">Elapsed</div>
+          </div>
+          <div className="text-center">
+            <div className="text-2xl font-mono font-bold text-emerald-400">{currentTurn}<span className="text-slate-600">/{maxTurns}</span></div>
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider">AI Turns</div>
+          </div>
+          <div className="text-center">
+            <div className="text-2xl font-mono font-bold text-amber-400">{tokens}</div>
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider">Tokens</div>
+          </div>
         </div>
-        <div className="text-center text-blue-300 text-sm mb-8">{latest?.message || 'Starting...'}</div>
-        <div className="bg-slate-800 rounded-lg p-4 max-h-60 overflow-y-auto">
+
+        {/* Progress bar */}
+        <div className="w-full bg-slate-700 rounded-full h-2.5 mb-3">
+          <div className="bg-blue-500 h-2.5 rounded-full transition-all duration-700 ease-out" style={{ width: `${pct}%` }} />
+        </div>
+        <div className="text-center text-slate-400 text-xs mb-6">
+          {latest?.message?.replace(/^\[[\d:]+\]\s*Turn \d+\/\d+\s*\|\s*[\d,]+ tokens\s*\|\s*/, '') || 'Starting...'}
+        </div>
+
+        {/* Event log */}
+        <div className="bg-slate-800/60 rounded-lg p-3 max-h-48 overflow-y-auto border border-slate-700">
           {events.map((ev, i) => (
-            <div key={i} className="text-xs text-slate-400 py-1 flex gap-2">
-              <span className="text-slate-600 min-w-[3ch]">{ev.percent}%</span>
+            <div key={i} className="text-[11px] text-slate-400 py-0.5 font-mono flex gap-2">
+              <span className="text-blue-500/60 min-w-[3ch] text-right">{ev.percent}%</span>
+              <span className="text-slate-500">│</span>
               <span>{ev.message}</span>
             </div>
           ))}

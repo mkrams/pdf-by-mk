@@ -16,52 +16,49 @@ from .pdf_utils import annotate_pdf
 from .models import ChangeItem, ProgressEvent
 
 SYSTEM_PROMPT = """\
-You are a PDF document comparison analyst. You compare two versions of a document \
-and produce a comprehensive, verified change register.
+You are a fast, efficient PDF document comparison analyst. Compare two document \
+versions and produce a verified change register.
 
-You have tools to extract text, detect structure, search, and diff the documents. \
-Use them extensively to be thorough.
+## SPEED RULES (CRITICAL)
+- Call multiple tools in parallel whenever possible (e.g. extract both PDFs at once).
+- Do NOT extract full text of both documents — use detect_document_structure and \
+detect_revision_history first, then use targeted page reads and search.
+- Use diff_sections for systematic comparison instead of reading every page.
+- Limit verification searches to 2-3 key terms per NEW/REMOVED item — don't over-search.
+- Submit your changes as soon as you have them. Don't do unnecessary extra passes.
+- You have a MAXIMUM of 15 turns. Be efficient.
+- Report progress every 2-3 tool calls.
 
-## Your Process
+## Process (be fast)
 
-1. **Extract & Understand**: Extract text from both PDFs. Understand what kind of \
-documents these are (standards, specs, contracts, policies, etc.).
+1. **Structure + Manifest** (parallel): Call detect_document_structure on both + \
+detect_revision_history on the new PDF — all in one turn.
 
-2. **Detect Manifest**: Check if either document contains a revision history, change \
-log, or manifest of changes. If found, use it as your ground-truth checklist.
+2. **Diff**: Run diff_sections to get all changes at once.
 
-3. **Parse Structure**: Detect section headings and structure in both documents. \
-Check if sections were renumbered between versions.
+3. **Read targeted pages**: Only read specific pages where diffs were found.
 
-4. **Systematic Diff**: Run section-by-section diffs. Identify every substantive change.
+4. **Classify**: For each change — category (NEW/MODIFIED/REMOVED/STRUCTURAL), \
+title, description, old_text, new_text, impact level.
 
-5. **Classify & Describe**: For each change, determine:
-   - Category: NEW (content that didn't exist before), MODIFIED (changed content), \
-REMOVED (content that was deleted), STRUCTURAL (reorganization/renumbering)
-   - A clear title (what changed)
-   - A description (why it matters)
-   - The exact old text and new text
+5. **Quick verify**: For NEW items, one search in old doc. For REMOVED, one search \
+in new doc. Batch multiple searches in parallel.
 
-6. **Verify**: For NEW items, search the old document to confirm the concept truly \
-doesn't exist elsewhere. For REMOVED items, search the new document to confirm no \
-traces remain. Record what you searched and what you found.
+6. **Submit**: Call submit_changes immediately.
 
-7. **Assess Impact**: Rate each change: CRITICAL (changes pass/fail criteria or core \
-requirements), HIGH (significant new requirements or scope changes), MEDIUM (process \
-or reference updates), LOW (editorial, formatting, numbering).
+## Impact Levels
+- CRITICAL: changes pass/fail criteria or core requirements
+- HIGH: significant new requirements or scope changes
+- MEDIUM: process or reference updates
+- LOW: editorial, formatting, numbering
 
-8. **Submit**: Call submit_changes with your complete register.
-
-## Important Rules
-- Report progress frequently using report_progress so the user can see what you're doing.
-- Be thorough — check the ENTIRE document, don't just spot-check.
-- For verification, record the keywords you searched and the conclusion.
-- Include search_old and search_new snippets (short text to find in each PDF for highlighting).
-- If a manifest exists, verify you've covered every item in it.
-- Don't hallucinate changes — only report what you actually found in the diffs.
+## Required Fields per Change
+section, title, category, description, old_text, new_text, impact, \
+verification_status, verification_conclusion, verification_keywords, \
+search_old (snippet for annotation), search_new (snippet for annotation)
 """
 
-MAX_AGENT_TURNS = 30
+MAX_AGENT_TURNS = 15
 
 
 async def run_analysis(
@@ -88,39 +85,51 @@ async def run_analysis(
         "submitted_manifest": None,
     }
 
-    async def emit(stage, percent, message):
+    start_time = time.time()
+    total_input_tokens = 0
+    total_output_tokens = 0
+
+    async def emit(stage, percent, message, turn=0):
         if progress_callback:
+            elapsed = int(time.time() - start_time)
+            mins, secs = divmod(elapsed, 60)
+            detail = f"[{mins}:{secs:02d}] Turn {turn}/{MAX_AGENT_TURNS} | {total_input_tokens + total_output_tokens:,} tokens | {message}"
             await progress_callback(ProgressEvent(
-                stage=stage, percent=percent, message=message,
+                stage=stage, percent=percent, message=detail,
                 timestamp=datetime.utcnow().isoformat(),
             ))
 
-    await emit("starting", 0, "Starting analysis...")
+    await emit("starting", 0, "Starting analysis...", 0)
 
     # Build initial user message
     user_msg = (
         f"Compare these two PDF documents and produce a complete change register.\n\n"
         f"**Old version**: '{old_label}' — uploaded as 'old' PDF\n"
         f"**New version**: '{new_label}' — uploaded as 'new' PDF\n\n"
-        f"Be thorough. Extract text, detect structure and any revision history, "
-        f"run systematic diffs, classify every change, verify NEW and REMOVED items, "
-        f"assess impact, and submit the complete register."
+        f"Be fast and efficient. Start by detecting structure and revision history "
+        f"in parallel. Then diff, classify, verify, and submit."
     )
 
     messages = [{"role": "user", "content": user_msg}]
 
     for turn in range(MAX_AGENT_TURNS):
+        turn_num = turn + 1
+
         try:
             response = client.messages.create(
                 model=CLAUDE_MODEL,
-                max_tokens=8192,
+                max_tokens=16384,
                 system=SYSTEM_PROMPT,
                 tools=TOOL_DEFINITIONS,
                 messages=messages,
             )
         except Exception as e:
-            await emit("error", 0, f"Claude API error: {str(e)}")
+            await emit("error", 0, f"Claude API error: {str(e)}", turn_num)
             raise
+
+        # Track tokens
+        total_input_tokens += response.usage.input_tokens
+        total_output_tokens += response.usage.output_tokens
 
         # Process response
         assistant_content = response.content
@@ -130,23 +139,19 @@ async def run_analysis(
         tool_use_blocks = [b for b in assistant_content if b.type == "tool_use"]
 
         if not tool_use_blocks:
-            # No tools called — agent is done
-            await emit("agent_done", 85, "Agent finished analysis")
+            pct = min(85, int(turn_num / MAX_AGENT_TURNS * 85))
+            await emit("agent_done", pct, "Agent finished analysis", turn_num)
             break
 
         # Process ALL tool calls and return results together
         tool_results = []
+        tool_names = []
         for block in tool_use_blocks:
             tool_name = block.name
             tool_input = block.input
+            tool_names.append(tool_name)
 
-            # Handle progress reporting
             if tool_name == "report_progress":
-                await emit(
-                    tool_input.get("stage", "working"),
-                    tool_input.get("percent", 0),
-                    tool_input.get("message", ""),
-                )
                 result_str = json.dumps({"status": "reported"})
             else:
                 result_str = execute_tool(tool_name, tool_input, job_context)
@@ -159,11 +164,14 @@ async def run_analysis(
 
         messages.append({"role": "user", "content": tool_results})
 
-        # If stop_reason was end_turn but had tool calls, we processed them above
-        # and will continue the loop. If no more tools needed, next turn will break.
+        # Emit progress with tool names
+        pct = min(80, int(turn_num / MAX_AGENT_TURNS * 80))
+        tools_str = ", ".join(t for t in tool_names if t != "report_progress")
+        if tools_str:
+            await emit("working", pct, f"Called: {tools_str}", turn_num)
 
     # Post-process: build annotated PDFs
-    await emit("annotating", 88, "Generating annotated PDFs...")
+    await emit("annotating", 88, "Generating annotated PDFs...", MAX_AGENT_TURNS)
 
     changes = job_context.get("submitted_changes") or []
     manifest_data = job_context.get("submitted_manifest")
@@ -185,7 +193,7 @@ async def run_analysis(
     old_result = annotate_pdf(old_pdf_path, old_ann_path, old_annotations)
     new_result = annotate_pdf(new_pdf_path, new_ann_path, new_annotations)
 
-    await emit("annotating", 95, f"Annotated {old_result['highlights']} + {new_result['highlights']} passages")
+    await emit("annotating", 95, f"Annotated {old_result['highlights']} + {new_result['highlights']} passages", MAX_AGENT_TURNS)
 
     # Build final change items with page numbers
     final_changes = []
@@ -219,7 +227,12 @@ async def run_analysis(
         by_category[c.category] = by_category.get(c.category, 0) + 1
         by_impact[c.impact_level] = by_impact.get(c.impact_level, 0) + 1
 
-    await emit("complete", 100, f"Analysis complete: {len(final_changes)} changes found")
+    elapsed = int(time.time() - start_time)
+    mins, secs = divmod(elapsed, 60)
+    await emit("complete", 100,
+        f"Done in {mins}:{secs:02d} — {len(final_changes)} changes, "
+        f"{total_input_tokens + total_output_tokens:,} tokens",
+        MAX_AGENT_TURNS)
 
     return {
         "changes": [c.model_dump() for c in final_changes],
