@@ -180,6 +180,11 @@ export default function UploadPage() {
         background: 'linear-gradient(180deg, #0a001a 0%, #1a0533 30%, #2d0a4e 60%, #1a0a3e 100%)',
       }}>
 
+      {/* Version info — top left */}
+      <div className="absolute top-3 left-4 z-20 text-[10px] font-mono text-white/20">
+        v1.2.0 · {__BUILD_TIME__ || '—'}
+      </div>
+
       {/* Background layers */}
       <RetroGrid />
       <Skyline />

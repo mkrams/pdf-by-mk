@@ -28,7 +28,7 @@ detect_revision_history first, then use targeted page reads and search.
 - Use diff_sections for systematic comparison instead of reading every page.
 - Limit verification searches to 2-3 key terms per NEW/REMOVED item — don't over-search.
 - Submit your changes as soon as you have them. Don't do unnecessary extra passes.
-- You have a MAXIMUM of 15 turns. Be efficient.
+- You have a MAXIMUM of 20 turns. Be efficient but thorough.
 - Report progress every 2-3 tool calls.
 
 ## Process (be fast)
@@ -60,8 +60,8 @@ verification_status, verification_conclusion, verification_keywords, \
 search_old (snippet for annotation), search_new (snippet for annotation)
 """
 
-MAX_AGENT_TURNS = 15
-JOB_TIMEOUT_SECONDS = 300  # 5 minute hard timeout
+MAX_AGENT_TURNS = 20
+JOB_TIMEOUT_SECONDS = 420  # 7 minute hard timeout
 MAX_RETRIES = 3
 RETRY_BACKOFF = [5, 15, 30]  # seconds to wait between retries
 

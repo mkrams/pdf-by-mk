@@ -403,6 +403,29 @@ def annotate_pdf(pdf_path: str, output_path: str, annotations: list) -> dict:
     return {"highlights": highlight_count, "page_map": page_map, "output": output_path}
 
 
+def render_page_image(pdf_path: str, page_num: int, dpi: int = 150) -> bytes:
+    """Render a PDF page as a PNG image. Returns raw PNG bytes."""
+    doc = fitz.open(pdf_path)
+    if page_num < 1 or page_num > len(doc):
+        doc.close()
+        raise ValueError(f"Page {page_num} out of range (1-{len(doc)})")
+    page = doc[page_num - 1]
+    zoom = dpi / 72.0
+    mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    png_bytes = pix.tobytes("png")
+    doc.close()
+    return png_bytes
+
+
+def get_page_count(pdf_path: str) -> int:
+    """Get the number of pages in a PDF."""
+    doc = fitz.open(pdf_path)
+    count = len(doc)
+    doc.close()
+    return count
+
+
 def _expand_to_paragraph(page, rects):
     """Expand highlight rects to cover the full surrounding paragraph."""
     if not rects:

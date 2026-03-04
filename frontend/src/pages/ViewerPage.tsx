@@ -3,7 +3,9 @@ import { useParams } from 'react-router-dom';
 import { useAnalysis } from '../hooks/useAnalysis';
 import type { ChangeItem, ProgressEvent } from '../types';
 
-// ── Category & Impact colors ─────────────────────────────────────
+const API = import.meta.env.VITE_API_URL || '';
+
+// ── Category colors ─────────────────────────────────────────────
 
 const CAT_COLORS: Record<string, string> = {
   NEW: 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300',
@@ -17,12 +19,6 @@ const CAT_BORDER: Record<string, string> = {
   REMOVED: 'border-gray-400',
   STRUCTURAL: 'border-purple-400',
 };
-const IMP_COLORS: Record<string, string> = {
-  CRITICAL: 'bg-red-900 text-red-200',
-  HIGH: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
-  MEDIUM: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
-  LOW: 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300',
-};
 
 function Badge({ text, colors }: { text: string; colors: string }) {
   return <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${colors}`}>{text}</span>;
@@ -32,11 +28,13 @@ function Badge({ text, colors }: { text: string; colors: string }) {
 
 function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: string | null }) {
   const latest = events[events.length - 1];
-  const [elapsed, setElapsed] = useState(0);
+  const startRef = useRef(Date.now());
+  const [now, setNow] = useState(Date.now());
   const logRef = React.useRef<HTMLDivElement>(null);
 
+  // Continuous timer — ticks every second, never resets
   useEffect(() => {
-    const t = setInterval(() => setElapsed(e => e + 1), 1000);
+    const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
 
@@ -44,18 +42,17 @@ function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: s
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [events]);
 
-  // Use structured fields from the event, with local timer as fallback
-  const elapsedSecs = latest?.elapsed || elapsed;
+  // Elapsed from local clock — continuous, never jumps
+  const elapsedSecs = Math.floor((now - startRef.current) / 1000);
   const mins = Math.floor(elapsedSecs / 60);
   const secs = elapsedSecs % 60;
   const currentTurn = latest?.turn || 0;
-  const maxTurns = latest?.max_turns || 15;
+  const maxTurns = latest?.max_turns || 20;
   const tokens = latest?.tokens || 0;
   const tokensStr = tokens > 0 ? tokens.toLocaleString() : '0';
 
-  // Progress bar: based on elapsed time (typical analysis is 3-5 min)
-  // Smoothly fills to ~90% over 5 min, never reaches 100% until done
-  const timePct = Math.min(90, Math.round((elapsedSecs / 300) * 90));
+  // Progress bar: based on elapsed time (typical analysis is 3-7 min)
+  const timePct = Math.min(90, Math.round((elapsedSecs / 360) * 90));
   const pct = latest?.stage === 'complete' ? 100 : Math.max(timePct, latest?.percent || 0);
 
   return (
@@ -201,42 +198,32 @@ function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: s
 // ── Change List (left panel) ─────────────────────────────────────
 
 function ChangeList({
-  changes, selectedId, onSelect, search, onSearch, catFilter, onCatFilter, impFilter, onImpFilter,
+  changes, selectedId, onSelect, search, onSearch, catFilter, onCatFilter,
 }: {
   changes: ChangeItem[];
   selectedId: number | null;
   onSelect: (id: number) => void;
   search: string; onSearch: (s: string) => void;
   catFilter: string; onCatFilter: (s: string) => void;
-  impFilter: string; onImpFilter: (s: string) => void;
 }) {
   const cats = useMemo(() => [...new Set(changes.map(c => c.category))].sort(), [changes]);
-  const imps = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
 
   const filtered = useMemo(() => changes.filter(c => {
     if (catFilter && c.category !== catFilter) return false;
-    if (impFilter && c.impact_level !== impFilter) return false;
     if (search && !`${c.title} ${c.description} ${c.section}`.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
-  }), [changes, catFilter, impFilter, search]);
+  }), [changes, catFilter, search]);
 
   return (
     <div className="w-72 min-w-[260px] border-r border-gray-200 dark:border-gray-700 flex flex-col bg-white dark:bg-gray-900 shrink-0">
       <div className="p-2 border-b border-gray-200 dark:border-gray-700 space-y-1">
         <input type="text" value={search} onChange={e => onSearch(e.target.value)}
           placeholder="Search changes..." className="w-full px-2 py-1.5 text-xs border rounded bg-gray-50 dark:bg-gray-800 dark:text-gray-200 dark:border-gray-600" />
-        <div className="flex gap-1">
-          <select value={catFilter} onChange={e => onCatFilter(e.target.value)}
-            className="flex-1 text-xs px-1 py-1 border rounded bg-gray-50 dark:bg-gray-800 dark:text-gray-200 dark:border-gray-600">
-            <option value="">All Categories</option>
-            {cats.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
-          <select value={impFilter} onChange={e => onImpFilter(e.target.value)}
-            className="flex-1 text-xs px-1 py-1 border rounded bg-gray-50 dark:bg-gray-800 dark:text-gray-200 dark:border-gray-600">
-            <option value="">All Impacts</option>
-            {imps.map(i => <option key={i} value={i}>{i}</option>)}
-          </select>
-        </div>
+        <select value={catFilter} onChange={e => onCatFilter(e.target.value)}
+          className="w-full text-xs px-1 py-1 border rounded bg-gray-50 dark:bg-gray-800 dark:text-gray-200 dark:border-gray-600">
+          <option value="">All Categories</option>
+          {cats.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
       </div>
       <div className="flex-1 overflow-y-auto">
         {filtered.map(c => (
@@ -249,7 +236,6 @@ function ChangeList({
             </div>
             <div className="flex gap-1 mt-1">
               <Badge text={c.category} colors={CAT_COLORS[c.category] || ''} />
-              <Badge text={c.impact_level} colors={IMP_COLORS[c.impact_level] || ''} />
               <span className="text-[10px] text-gray-400">{'\u00A7'}{c.section}</span>
             </div>
           </div>
@@ -260,89 +246,220 @@ function ChangeList({
   );
 }
 
-// ── Document Map (right panel) ───────────────────────────────────
-// Shows all changes organized by page, with the selected one highlighted.
-// Clicking a change here also selects it. Auto-scrolls to the selected change.
+// ── PDF Page Viewer (right panel) ─────────────────────────────────
+// Renders actual PDF pages as images from the backend.
+// Scrolls to and highlights the page containing the selected change.
 
-function DocumentMap({
-  changes, selectedId, onSelect, viewMode,
+function PdfPageViewer({
+  jobId, changes, selectedId, onSelect, viewMode, totalPages,
 }: {
+  jobId: string;
   changes: ChangeItem[];
   selectedId: number | null;
   onSelect: (id: number) => void;
   viewMode: 'old' | 'new';
+  totalPages: number;
 }) {
-  const selectedRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const [loadedPages, setLoadedPages] = useState<Set<number>>(new Set());
+  const [visibleRange, setVisibleRange] = useState<[number, number]>([1, 3]);
 
-  // Group changes by page
-  const byPage = useMemo(() => {
+  // Get the page for the selected change
+  const selectedChange = changes.find(c => c.id === selectedId);
+  const targetPage = selectedChange
+    ? (viewMode === 'old' ? selectedChange.old_page : selectedChange.new_page) || 0
+    : 0;
+
+  // Build page → changes mapping
+  const changesByPage = useMemo(() => {
     const map = new Map<number, ChangeItem[]>();
     for (const c of changes) {
       const pg = viewMode === 'old' ? (c.old_page || 0) : (c.new_page || 0);
-      if (!map.has(pg)) map.set(pg, []);
-      map.get(pg)!.push(c);
+      if (pg > 0) {
+        if (!map.has(pg)) map.set(pg, []);
+        map.get(pg)!.push(c);
+      }
     }
-    return [...map.entries()].sort((a, b) => a[0] - b[0]);
+    return map;
   }, [changes, viewMode]);
 
-  // Auto-scroll to selected change
+  // Scroll to target page when selection changes
   useEffect(() => {
-    if (selectedRef.current) {
-      selectedRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (targetPage > 0) {
+      const el = pageRefs.current.get(targetPage);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      // Ensure this page and neighbors are loaded
+      setVisibleRange([Math.max(1, targetPage - 1), Math.min(totalPages, targetPage + 2)]);
     }
-  }, [selectedId]);
+  }, [targetPage, totalPages]);
+
+  // Observe scroll to determine visible pages (lazy loading)
+  useEffect(() => {
+    if (!containerRef.current || totalPages === 0) return;
+    const container = containerRef.current;
+
+    const handleScroll = () => {
+      const rect = container.getBoundingClientRect();
+      let minPage = totalPages;
+      let maxPage = 1;
+      pageRefs.current.forEach((el, pg) => {
+        const r = el.getBoundingClientRect();
+        if (r.bottom > rect.top && r.top < rect.bottom) {
+          minPage = Math.min(minPage, pg);
+          maxPage = Math.max(maxPage, pg);
+        }
+      });
+      // Load 2 pages before and after visible range
+      setVisibleRange([Math.max(1, minPage - 2), Math.min(totalPages, maxPage + 2)]);
+    };
+
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    handleScroll(); // initial
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, [totalPages]);
+
+  // Pages to actually render (visible range + target page neighborhood)
+  const pagesToRender = useMemo(() => {
+    const pages = new Set<number>();
+    for (let p = visibleRange[0]; p <= visibleRange[1]; p++) pages.add(p);
+    if (targetPage > 0) {
+      pages.add(Math.max(1, targetPage - 1));
+      pages.add(targetPage);
+      pages.add(Math.min(totalPages, targetPage + 1));
+    }
+    // Always load first few pages
+    for (let p = 1; p <= Math.min(3, totalPages); p++) pages.add(p);
+    return pages;
+  }, [visibleRange, targetPage, totalPages]);
+
+  if (totalPages === 0) {
+    return (
+      <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">
+        No PDF pages available
+      </div>
+    );
+  }
 
   return (
-    <div className="flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-950 p-3">
-      <div className="text-[10px] uppercase tracking-wider text-gray-400 dark:text-gray-600 mb-2 font-bold px-1">
-        {viewMode === 'old' ? 'Old Document' : 'New Document'} — {changes.length} annotations
+    <div ref={containerRef} className="flex-1 overflow-y-auto bg-gray-200 dark:bg-gray-950">
+      <div className="text-[10px] uppercase tracking-wider text-gray-500 dark:text-gray-600 font-bold px-3 py-2 sticky top-0 z-20 bg-gray-200 dark:bg-gray-950 border-b border-gray-300 dark:border-gray-800">
+        {viewMode === 'old' ? 'Old Document' : 'New Document'} — {totalPages} pages
       </div>
-      {byPage.map(([page, pageChanges]) => (
-        <div key={page} className="mb-3">
-          <div className="text-[10px] font-bold text-gray-400 dark:text-gray-600 px-1 mb-1 sticky top-0 bg-gray-50 dark:bg-gray-950 py-1 z-10">
-            {page === 0 ? 'Page unknown' : `Page ${page}`}
-          </div>
-          <div className="space-y-1.5">
-            {pageChanges.map(c => {
-              const isSelected = c.id === selectedId;
-              const text = viewMode === 'old' ? c.old_text : c.new_text;
-              return (
-                <div
-                  key={c.id}
-                  ref={isSelected ? selectedRef : undefined}
-                  onClick={() => onSelect(c.id)}
-                  className={`rounded-lg p-2.5 cursor-pointer transition-all border-l-[3px] ${CAT_BORDER[c.category] || 'border-gray-300'}
-                    ${isSelected
-                      ? 'bg-white dark:bg-gray-800 shadow-md ring-2 ring-blue-400/50'
-                      : 'bg-white/60 dark:bg-gray-900/60 hover:bg-white dark:hover:bg-gray-800 hover:shadow-sm'
-                    }`}
-                >
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <span className="text-[10px] font-bold text-gray-400">#{c.id}</span>
-                    <Badge text={c.category} colors={CAT_COLORS[c.category] || ''} />
-                    <Badge text={c.impact_level} colors={IMP_COLORS[c.impact_level] || ''} />
-                  </div>
-                  <div className="text-xs font-semibold text-gray-800 dark:text-gray-200 mb-1">{c.title}</div>
-                  {text ? (
-                    <div className={`text-[11px] leading-relaxed p-2 rounded font-mono whitespace-pre-wrap max-h-24 overflow-hidden
-                      ${viewMode === 'old'
-                        ? 'bg-red-50 dark:bg-red-950/30 text-red-900 dark:text-red-200'
-                        : 'bg-green-50 dark:bg-green-950/30 text-green-900 dark:text-green-200'
-                      }`}>
-                      {text}
-                    </div>
-                  ) : (
-                    <div className="text-[11px] text-gray-400 italic">
-                      {c.category === 'NEW' ? 'New addition' : c.category === 'REMOVED' ? 'Removed from document' : 'No text excerpt'}
-                    </div>
-                  )}
+      <div className="space-y-2 p-2">
+        {Array.from({ length: totalPages }, (_, i) => i + 1).map(pageNum => {
+          const shouldLoad = pagesToRender.has(pageNum);
+          const pageChanges = changesByPage.get(pageNum) || [];
+          const hasSelectedChange = pageChanges.some(c => c.id === selectedId);
+
+          return (
+            <div
+              key={pageNum}
+              ref={el => { if (el) pageRefs.current.set(pageNum, el); }}
+              className={`relative ${hasSelectedChange ? 'ring-2 ring-blue-500 rounded-lg' : ''}`}
+            >
+              {/* Page number label */}
+              <div className="absolute top-1 left-1 z-10 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded font-mono">
+                p.{pageNum}
+              </div>
+
+              {/* Change indicators on the page */}
+              {pageChanges.length > 0 && (
+                <div className="absolute top-1 right-1 z-10 flex gap-1">
+                  {pageChanges.map(c => (
+                    <button
+                      key={c.id}
+                      onClick={() => onSelect(c.id)}
+                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded cursor-pointer transition-all
+                        ${c.id === selectedId
+                          ? 'bg-blue-500 text-white shadow-lg scale-110'
+                          : 'bg-black/60 text-white hover:bg-blue-600'
+                        }`}
+                      title={`#${c.id}: ${c.title}`}
+                    >
+                      #{c.id}
+                    </button>
+                  ))}
                 </div>
-              );
-            })}
-          </div>
-        </div>
-      ))}
+              )}
+
+              {/* The actual PDF page image */}
+              {shouldLoad ? (
+                <PageImage jobId={jobId} which={viewMode} pageNum={pageNum} />
+              ) : (
+                <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm" style={{ height: 800 }}>
+                  <div className="flex items-center justify-center h-full text-gray-400 text-xs">
+                    Page {pageNum}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
+  );
+}
+
+// Single page image component with loading state
+function PageImage({ jobId, which, pageNum }: { jobId: string; which: string; pageNum: number }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    setError(false);
+    const url = `${API}/api/analyze/${jobId}/page/${which}/${pageNum}`;
+    // Use fetch to load as blob for better caching control
+    fetch(url)
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.blob();
+      })
+      .then(blob => {
+        setSrc(URL.createObjectURL(blob));
+        setLoading(false);
+      })
+      .catch(() => {
+        setError(true);
+        setLoading(false);
+      });
+
+    return () => {
+      if (src) URL.revokeObjectURL(src);
+    };
+  }, [jobId, which, pageNum]);
+
+  if (loading) {
+    return (
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm animate-pulse" style={{ height: 800 }}>
+        <div className="flex items-center justify-center h-full text-gray-400 text-xs">
+          Loading page {pageNum}...
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !src) {
+    return (
+      <div className="bg-red-50 dark:bg-red-950/30 rounded-lg shadow-sm" style={{ height: 200 }}>
+        <div className="flex items-center justify-center h-full text-red-400 text-xs">
+          Failed to load page {pageNum}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={`Page ${pageNum}`}
+      className="w-full rounded-lg shadow-sm"
+      style={{ background: 'white' }}
+    />
   );
 }
 
@@ -355,11 +472,11 @@ export default function ViewerPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
   const [catFilter, setCatFilter] = useState('');
-  const [impFilter, setImpFilter] = useState('');
   const [viewMode, setViewMode] = useState<'old' | 'new'>('new');
   const [dark, setDark] = useState(true);
 
   const changes = result?.changes || [];
+  const totalPages = viewMode === 'old' ? (result?.old_pages || 0) : (result?.new_pages || 0);
 
   // Debug logging
   useEffect(() => {
@@ -368,7 +485,8 @@ export default function ViewerPage() {
       isComplete,
       error,
       changesCount: changes.length,
-      resultKeys: result ? Object.keys(result) : [],
+      oldPages: result?.old_pages,
+      newPages: result?.new_pages,
     });
   }, [result, isComplete, error, changes.length]);
 
@@ -408,7 +526,8 @@ export default function ViewerPage() {
     <div className={`h-screen flex flex-col ${dark ? 'dark' : ''}`}>
       {/* Header */}
       <div className="bg-gradient-to-r from-slate-800 to-blue-800 text-white px-4 py-2 flex items-center gap-4 shrink-0">
-        <h1 className="text-sm font-bold whitespace-nowrap"
+        <h1 className="text-sm font-bold whitespace-nowrap cursor-pointer"
+          onClick={() => window.location.href = '/'}
           style={{
             background: 'linear-gradient(135deg, #ff2d95, #00e5ff)',
             WebkitBackgroundClip: 'text',
@@ -419,7 +538,7 @@ export default function ViewerPage() {
         {result && (
           <div className="flex gap-2 text-[10px]">
             <span className="bg-white/15 px-2 py-0.5 rounded-full">{result.total_changes} changes</span>
-            {Object.entries(result.by_impact || {}).map(([k, v]) => (
+            {Object.entries(result.by_category || {}).map(([k, v]) => (
               <span key={k} className="bg-white/10 px-2 py-0.5 rounded-full">{k}: {v}</span>
             ))}
           </div>
@@ -442,7 +561,6 @@ export default function ViewerPage() {
             onSelect={setSelectedId}
             search={search} onSearch={setSearch}
             catFilter={catFilter} onCatFilter={setCatFilter}
-            impFilter={impFilter} onImpFilter={setImpFilter}
           />
 
           {/* Center: change detail */}
@@ -453,7 +571,6 @@ export default function ViewerPage() {
                   <h2 className="text-lg font-bold text-gray-900 dark:text-gray-100">#{selectedChange.id}: {selectedChange.title}</h2>
                   <div className="flex gap-2 mt-1 flex-wrap">
                     <Badge text={selectedChange.category} colors={CAT_COLORS[selectedChange.category] || ''} />
-                    <Badge text={selectedChange.impact_level} colors={IMP_COLORS[selectedChange.impact_level] || ''} />
                     {selectedChange.manifest_item && selectedChange.manifest_item !== '[not in manifest]' && (
                       <Badge text={`Manifest: ${selectedChange.manifest_item}`} colors="bg-blue-100 text-blue-700" />
                     )}
@@ -497,8 +614,6 @@ export default function ViewerPage() {
                     {selectedChange.new_text || <em className="text-gray-400">[Not applicable]</em>}
                   </div>
                 </div>
-
-                <div className="text-xs text-gray-500"><b>Impact:</b> {selectedChange.impact}</div>
               </div>
             ) : (
               <div className="flex-1 flex items-center justify-center h-full text-gray-400 dark:text-gray-600">
@@ -507,8 +622,8 @@ export default function ViewerPage() {
             )}
           </div>
 
-          {/* Right: document map with annotations */}
-          <div className="w-[380px] min-w-[320px] flex flex-col shrink-0">
+          {/* Right: actual PDF page viewer */}
+          <div className="w-[420px] min-w-[350px] flex flex-col shrink-0">
             <div className="flex border-b border-gray-200 dark:border-gray-700">
               {(['old', 'new'] as const).map(tab => (
                 <button key={tab} onClick={() => setViewMode(tab)}
@@ -517,15 +632,17 @@ export default function ViewerPage() {
                       ? 'bg-white dark:bg-gray-900 border-b-2 border-blue-500 text-blue-600'
                       : 'bg-gray-100 dark:bg-gray-800 text-gray-500 hover:text-gray-700'
                     }`}>
-                  {tab === 'old' ? 'Old Document' : 'New Document'}
+                  {tab === 'old' ? `Old (${result?.old_pages || '?'}p)` : `New (${result?.new_pages || '?'}p)`}
                 </button>
               ))}
             </div>
-            <DocumentMap
+            <PdfPageViewer
+              jobId={jobId}
               changes={changes}
               selectedId={selectedId}
               onSelect={setSelectedId}
               viewMode={viewMode}
+              totalPages={totalPages}
             />
           </div>
         </div>

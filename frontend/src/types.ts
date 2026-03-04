@@ -26,6 +26,8 @@ export interface AnalysisResult {
   by_category: Record<string, number>;
   by_impact: Record<string, number>;
   changes: ChangeItem[];
+  old_pages?: number;
+  new_pages?: number;
   manifest?: {
     detected: boolean;
     source?: string;

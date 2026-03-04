@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, Response
 from .config import CORS_ORIGINS, UPLOAD_DIR, MAX_FILE_SIZE, JOB_EXPIRY_SECONDS
 from .agent import run_analysis
 from .models import ProgressEvent
+from .pdf_utils import render_page_image, get_page_count
 
 app = FastAPI(title="PDF by MK", version="1.0.0")
 
@@ -240,6 +241,16 @@ async def get_result(job_id: str):
         return JSONResponse({"status": "failed", "error": job["error"]}, status_code=200)
 
     result = job["result"]
+
+    # Get page counts for PDF viewer
+    old_pages = 0
+    new_pages = 0
+    try:
+        old_pages = get_page_count(job["old_pdf_path"])
+        new_pages = get_page_count(job["new_pdf_path"])
+    except Exception:
+        pass
+
     return {
         "job_id": job_id,
         "status": "completed",
@@ -251,6 +262,8 @@ async def get_result(job_id: str):
         "by_impact": result["by_impact"],
         "changes": result["changes"],
         "manifest": result.get("manifest"),
+        "old_pages": old_pages,
+        "new_pages": new_pages,
     }
 
 
@@ -286,5 +299,54 @@ async def serve_pdf(job_id: str, which: str):
         headers={
             "Content-Disposition": f'inline; filename="{filename}"',
             "Content-Length": str(len(pdf_bytes)),
+        },
+    )
+
+
+# Page image cache: job_id -> {(which, page_num): png_bytes}
+_page_cache: dict[str, dict] = {}
+
+
+@app.get("/api/analyze/{job_id}/page/{which}/{page_num}")
+async def serve_page_image(job_id: str, which: str, page_num: int):
+    """Render a single PDF page as a PNG image for the viewer."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+
+    job = jobs[job_id]
+    result = job.get("result")
+
+    if which == "old":
+        # Use annotated PDF if available, otherwise original
+        path = (result or {}).get("old_annotated_path") or job.get("old_pdf_path")
+    elif which == "new":
+        path = (result or {}).get("new_annotated_path") or job.get("new_pdf_path")
+    else:
+        raise HTTPException(400, "Invalid type. Use 'old' or 'new'.")
+
+    if not path or not os.path.exists(path):
+        raise HTTPException(404, "PDF not found")
+
+    # Check cache
+    cache_key = (which, page_num)
+    if job_id not in _page_cache:
+        _page_cache[job_id] = {}
+    if cache_key in _page_cache[job_id]:
+        png_bytes = _page_cache[job_id][cache_key]
+    else:
+        try:
+            png_bytes = await asyncio.to_thread(render_page_image, path, page_num, 150)
+            _page_cache[job_id][cache_key] = png_bytes
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            raise HTTPException(500, f"Failed to render page: {str(e)}")
+
+    return Response(
+        content=png_bytes,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=3600",
+            "Content-Length": str(len(png_bytes)),
         },
     )
