@@ -125,7 +125,7 @@ async def start_analysis_endpoint(
     }
 
 
-MINI_AGENT_BATCH_SIZE = 1  # Sequential mini-agents to minimize Railway memory usage
+MINI_AGENT_BATCH_SIZE = 3  # Parallel mini-agents per batch (Railway upgraded tier)
 
 # Semaphore to limit concurrent page image renders (prevents OOM from burst of page requests)
 _page_render_semaphore: asyncio.Semaphore | None = None
