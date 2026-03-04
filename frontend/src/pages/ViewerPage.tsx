@@ -251,7 +251,7 @@ function ChangeList({
 // Scrolls to and highlights the page containing the selected change.
 
 function PdfPageViewer({
-  jobId, changes, selectedId, onSelect, viewMode, totalPages,
+  jobId, changes, selectedId, onSelect, viewMode, totalPages, navToPage,
 }: {
   jobId: string;
   changes: ChangeItem[];
@@ -259,6 +259,7 @@ function PdfPageViewer({
   onSelect: (id: number) => void;
   viewMode: 'old' | 'new';
   totalPages: number;
+  navToPage?: { page: number; ts: number } | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
@@ -289,12 +290,25 @@ function PdfPageViewer({
     if (targetPage > 0) {
       const el = pageRefs.current.get(targetPage);
       if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
-      // Ensure this page and neighbors are loaded
       setVisibleRange([Math.max(1, targetPage - 1), Math.min(totalPages, targetPage + 2)]);
     }
   }, [targetPage, totalPages]);
+
+  // Respond to explicit navigation (clicking OLD/NEW text boxes)
+  useEffect(() => {
+    if (navToPage && navToPage.page > 0) {
+      // Ensure pages are loaded first, then scroll after a tick
+      setVisibleRange([Math.max(1, navToPage.page - 1), Math.min(totalPages, navToPage.page + 2)]);
+      setTimeout(() => {
+        const el = pageRefs.current.get(navToPage.page);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 100);
+    }
+  }, [navToPage, totalPages]);
 
   // Observe scroll to determine visible pages (lazy loading)
   useEffect(() => {
@@ -474,9 +488,18 @@ export default function ViewerPage() {
   const [catFilter, setCatFilter] = useState('');
   const [viewMode, setViewMode] = useState<'old' | 'new'>('new');
   const [dark, setDark] = useState(true);
+  // Navigate-to-page trigger: bumped each time user clicks OLD/NEW text boxes
+  const [navToPage, setNavToPage] = useState<{ page: number; ts: number } | null>(null);
 
   const changes = result?.changes || [];
   const totalPages = viewMode === 'old' ? (result?.old_pages || 0) : (result?.new_pages || 0);
+
+  // Handler: click OLD/NEW text box → switch doc + scroll to page
+  const navigateToDocPage = useCallback((which: 'old' | 'new', page: number | undefined) => {
+    if (!page) return;
+    setViewMode(which);
+    setNavToPage({ page, ts: Date.now() });
+  }, []);
 
   // Debug logging
   useEffect(() => {
@@ -585,31 +608,39 @@ export default function ViewerPage() {
                 </div>
 
                 {selectedChange.verification_status && selectedChange.verification_status !== 'N/A' && (
-                  <div className="mb-3 p-2 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900">
-                    <div className="text-xs font-bold mb-1">
+                  <div className="mb-3 p-2 rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800">
+                    <div className="text-xs font-bold mb-1 text-gray-700 dark:text-gray-200">
                       {selectedChange.verification_status.includes('CONFIRMED') ? '\u2713' : '\u26A0'}{' '}
                       Verification
                     </div>
-                    <div className={`text-xs font-semibold ${selectedChange.verification_status.includes('CONFIRMED') ? 'text-green-600' : 'text-amber-600'}`}>
+                    <div className={`text-xs font-semibold ${selectedChange.verification_status.includes('CONFIRMED') ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'}`}>
                       {selectedChange.verification_status}
                     </div>
                     {selectedChange.verification_conclusion && (
-                      <div className="text-[11px] text-gray-500 mt-1">{selectedChange.verification_conclusion}</div>
+                      <div className="text-[11px] text-gray-600 dark:text-gray-300 mt-1">{selectedChange.verification_conclusion}</div>
                     )}
                   </div>
                 )}
 
-                {/* Side-by-side old/new */}
+                {/* Side-by-side old/new — click to navigate PDF viewer */}
                 <div className="grid grid-cols-2 gap-3 mb-3">
-                  <div className="p-3 rounded-lg text-sm whitespace-pre-wrap bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-gray-800 dark:text-red-200">
-                    <div className="text-[11px] font-bold text-red-700 dark:text-red-400 mb-1">
-                      OLD {selectedChange.old_page && <span className="opacity-60 font-normal">p.{selectedChange.old_page}</span>}
+                  <div
+                    className={`p-3 rounded-lg text-sm whitespace-pre-wrap bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-gray-800 dark:text-red-200 transition-all ${selectedChange.old_page ? 'cursor-pointer hover:ring-2 hover:ring-red-400/50' : ''}`}
+                    onClick={() => navigateToDocPage('old', selectedChange.old_page || undefined)}
+                    title={selectedChange.old_page ? `Click to view page ${selectedChange.old_page} in old document` : undefined}
+                  >
+                    <div className="text-[11px] font-bold text-red-700 dark:text-red-400 mb-1 flex items-center gap-1">
+                      OLD {selectedChange.old_page && <span className="opacity-60 font-normal">p.{selectedChange.old_page} {'\u2197'}</span>}
                     </div>
                     {selectedChange.old_text || <em className="text-gray-400">[Not applicable]</em>}
                   </div>
-                  <div className="p-3 rounded-lg text-sm whitespace-pre-wrap bg-green-50 dark:bg-green-950/40 border border-green-200 dark:border-green-800 text-gray-800 dark:text-green-200">
-                    <div className="text-[11px] font-bold text-green-700 dark:text-green-400 mb-1">
-                      NEW {selectedChange.new_page && <span className="opacity-60 font-normal">p.{selectedChange.new_page}</span>}
+                  <div
+                    className={`p-3 rounded-lg text-sm whitespace-pre-wrap bg-green-50 dark:bg-green-950/40 border border-green-200 dark:border-green-800 text-gray-800 dark:text-green-200 transition-all ${selectedChange.new_page ? 'cursor-pointer hover:ring-2 hover:ring-green-400/50' : ''}`}
+                    onClick={() => navigateToDocPage('new', selectedChange.new_page || undefined)}
+                    title={selectedChange.new_page ? `Click to view page ${selectedChange.new_page} in new document` : undefined}
+                  >
+                    <div className="text-[11px] font-bold text-green-700 dark:text-green-400 mb-1 flex items-center gap-1">
+                      NEW {selectedChange.new_page && <span className="opacity-60 font-normal">p.{selectedChange.new_page} {'\u2197'}</span>}
                     </div>
                     {selectedChange.new_text || <em className="text-gray-400">[Not applicable]</em>}
                   </div>
@@ -622,8 +653,8 @@ export default function ViewerPage() {
             )}
           </div>
 
-          {/* Right: actual PDF page viewer */}
-          <div className="w-[420px] min-w-[350px] flex flex-col shrink-0">
+          {/* Right: actual PDF page viewer — ~40% of screen */}
+          <div className="flex flex-col shrink-0" style={{ width: '40%', minWidth: 400 }}>
             <div className="flex border-b border-gray-200 dark:border-gray-700">
               {(['old', 'new'] as const).map(tab => (
                 <button key={tab} onClick={() => setViewMode(tab)}
@@ -643,6 +674,7 @@ export default function ViewerPage() {
               onSelect={setSelectedId}
               viewMode={viewMode}
               totalPages={totalPages}
+              navToPage={navToPage}
             />
           </div>
         </div>
