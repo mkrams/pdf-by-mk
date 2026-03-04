@@ -97,7 +97,7 @@ def run_orchestrator(
     print(f"[orchestrator {job_id}] Diff complete: {len(diffs)} differences found")
 
     # ── Step 2: Build candidate list from diffs ─────────────────────
-    emit("orchestrator", 13, f"Building candidates from {len(diffs)} diffs...")
+    emit("orchestrator", 10, f"Building candidates from {len(diffs)} diffs...")
 
     candidates = []
     skipped_high_sim = 0
@@ -131,6 +131,42 @@ def run_orchestrator(
 
     if skipped_high_sim:
         print(f"[orchestrator {job_id}] Skipped {skipped_high_sim} near-identical sections (>95% similar)")
+
+    # ── Step 2b: Opus diff pass — AI reads pages to find missed changes ──
+    if effective_key:
+        emit("orchestrator", 14, "Running AI diff pass (Opus)...")
+        try:
+            opus_result = _opus_diff_pass(
+                effective_key, old_pdf_path, new_pdf_path,
+                old_page_count, new_page_count,
+                old_structure, new_structure, candidates
+            )
+            tokens_used += opus_result.get("tokens", 0)
+            opus_candidates = opus_result.get("candidates", [])
+            if opus_candidates:
+                # Dedup: only add Opus candidates for sections not already covered
+                covered = {_normalize_section_ref(c["section"]) for c in candidates}
+                added = 0
+                for oc in opus_candidates:
+                    norm = _normalize_section_ref(oc.get("section", ""))
+                    # Check if already covered (exact or prefix match)
+                    is_covered = False
+                    for cs in covered:
+                        if cs == norm or cs.startswith(norm + ".") or norm.startswith(cs + "."):
+                            is_covered = True
+                            break
+                    if not is_covered:
+                        oc["id"] = f"C{len(candidates)+1:03d}"
+                        oc["category_hint"] = oc.get("category_hint", "MODIFIED")
+                        oc["old_pages"] = _find_pages_for_section(oc["section"], old_structure)
+                        oc["new_pages"] = _find_pages_for_section(oc["section"], new_structure)
+                        oc["diff_preview"] = oc.get("diff_preview", f"AI-identified: {oc.get('title', '')}")
+                        candidates.append(oc)
+                        covered.add(norm)
+                        added += 1
+                print(f"[orchestrator {job_id}] Opus diff pass: {len(opus_candidates)} found, {added} new (rest already covered)")
+        except Exception as e:
+            print(f"[orchestrator {job_id}] Opus diff pass failed (non-fatal): {e}")
 
     # ── Step 3: Cross-check manifest ────────────────────────────────
     if manifest_items:
@@ -327,3 +363,107 @@ def _validate_with_claude(api_key, candidates, manifest, old_structure, new_stru
         pass
 
     return {"tokens": tokens, "extra_candidates": []}
+
+
+def _opus_diff_pass(
+    api_key, old_pdf_path, new_pdf_path,
+    old_page_count, new_page_count,
+    old_structure, new_structure,
+    existing_candidates
+) -> dict:
+    """
+    Send full document text from both PDFs to Opus and ask it to identify
+    all changes, including ones the programmatic diff may have missed.
+
+    Sends all pages by default (Opus has 200K context). Only truncates
+    individual pages if the total would be extremely large (>500 pages).
+
+    Returns {"tokens": int, "candidates": [dict, ...]}.
+    """
+    from .pdf_utils import extract_page_text
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    # For very large docs (>500 pages), truncate per-page text to stay in context
+    total_pages = old_page_count + new_page_count
+    per_page_limit = 0  # 0 = no limit
+    if total_pages > 500:
+        per_page_limit = 1500  # ~750K chars total, fits in 200K tokens
+    elif total_pages > 200:
+        per_page_limit = 3000
+
+    # Extract ALL pages from both docs
+    old_text_blocks = []
+    for p in range(1, old_page_count + 1):
+        result = extract_page_text(old_pdf_path, p)
+        text = result.get("text", "")
+        if text:
+            if per_page_limit:
+                text = text[:per_page_limit]
+            old_text_blocks.append(f"--- OLD Page {p} ---\n{text}")
+
+    new_text_blocks = []
+    for p in range(1, new_page_count + 1):
+        result = extract_page_text(new_pdf_path, p)
+        text = result.get("text", "")
+        if text:
+            if per_page_limit:
+                text = text[:per_page_limit]
+            new_text_blocks.append(f"--- NEW Page {p} ---\n{text}")
+
+    old_text = "\n\n".join(old_text_blocks)
+    new_text = "\n\n".join(new_text_blocks)
+
+    print(f"[opus-diff] Sending {old_page_count}+{new_page_count} pages "
+          f"({len(old_text)//1000}K + {len(new_text)//1000}K chars)")
+
+    # List existing candidates so Opus can focus on what's missing
+    existing_sections = [c["section"] for c in existing_candidates]
+
+    user_msg = (
+        f"I am comparing two versions of a PDF document.\n\n"
+        f"A programmatic diff has already identified these candidate change sections:\n"
+        f"{json.dumps(existing_sections)}\n\n"
+        f"Below is the COMPLETE extracted text from both document versions. "
+        f"Please carefully read and compare them page by page and identify ANY "
+        f"changes that the programmatic diff may have missed. Look for:\n"
+        f"- Wording changes (even single words or numbers)\n"
+        f"- Added or removed paragraphs, sentences, or bullet points\n"
+        f"- Changes in tables (values, rows, columns)\n"
+        f"- New or removed sections\n"
+        f"- Changes in references, dates, version numbers\n"
+        f"- Regulatory or compliance language changes\n"
+        f"- Any formatting or structural differences\n\n"
+        f"Return a JSON array of additional candidates NOT already in the list above. "
+        f"Each item should have:\n"
+        f'{{"section": "section ref", "title": "brief description", '
+        f'"category_hint": "NEW|MODIFIED|REMOVED|FORMATTING", '
+        f'"diff_preview": "brief description of what changed"}}\n\n'
+        f"If no additional changes are found, return [].\n"
+        f"Be thorough — it is better to flag a potential change than to miss one.\n\n"
+        f"=== OLD DOCUMENT ({old_page_count} pages) ===\n{old_text}\n\n"
+        f"=== NEW DOCUMENT ({new_page_count} pages) ===\n{new_text}"
+    )
+
+    response = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=8192,
+        messages=[{"role": "user", "content": user_msg}],
+        temperature=0,
+    )
+
+    tokens = response.usage.input_tokens + response.usage.output_tokens
+    text = response.content[0].text if response.content else "[]"
+    print(f"[opus-diff] Response: {tokens} tokens, {len(text)} chars")
+
+    # Extract JSON array from response
+    try:
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if match:
+            candidates = json.loads(match.group())
+            if isinstance(candidates, list):
+                return {"tokens": tokens, "candidates": candidates}
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    return {"tokens": tokens, "candidates": []}
