@@ -9,6 +9,7 @@ import asyncio
 import json
 import time
 import os
+import traceback
 import anthropic
 from datetime import datetime
 from typing import AsyncGenerator
@@ -198,6 +199,14 @@ async def run_analysis(
         for block in tool_use_blocks:
             tool_name = block.name
             tool_input = block.input
+            # Defensive: ensure tool_input is a dict
+            if isinstance(tool_input, str):
+                try:
+                    tool_input = json.loads(tool_input)
+                except (json.JSONDecodeError, TypeError):
+                    tool_input = {}
+            if not isinstance(tool_input, dict):
+                tool_input = {}
             tool_names.append(tool_name)
 
             if tool_name == "report_progress":
@@ -225,17 +234,29 @@ async def run_analysis(
     # Post-process: build annotated PDFs (CPU-bound, run in thread)
     await emit("annotating", 88, "Generating annotated PDFs...", MAX_AGENT_TURNS)
 
-    changes = job_context.get("submitted_changes") or []
+    raw_changes = job_context.get("submitted_changes") or []
     manifest_data = job_context.get("submitted_manifest")
+
+    # Defensive: ensure changes is a list of dicts
+    if isinstance(raw_changes, str):
+        try:
+            raw_changes = json.loads(raw_changes)
+        except (json.JSONDecodeError, TypeError):
+            raw_changes = []
+    if not isinstance(raw_changes, list):
+        raw_changes = []
+    changes = [c for c in raw_changes if isinstance(c, dict)]
 
     # Build annotation data
     old_annotations = []
     new_annotations = []
     for i, c in enumerate(changes):
-        if c.get("search_old"):
-            old_annotations.append({"change_id": i + 1, "search_text": c["search_old"]})
-        if c.get("search_new"):
-            new_annotations.append({"change_id": i + 1, "search_text": c["search_new"]})
+        search_old = c.get("search_old") if isinstance(c, dict) else None
+        search_new = c.get("search_new") if isinstance(c, dict) else None
+        if search_old:
+            old_annotations.append({"change_id": i + 1, "search_text": search_old})
+        if search_new:
+            new_annotations.append({"change_id": i + 1, "search_text": search_new})
 
     # Generate annotated PDFs in threads (CPU-bound)
     job_dir = os.path.dirname(old_pdf_path)
@@ -252,27 +273,33 @@ async def run_analysis(
     # Build final change items with page numbers
     final_changes = []
     for i, c in enumerate(changes):
-        impact_level = c.get("impact", "MEDIUM").split(" ")[0].split("—")[0].strip()
-        if impact_level not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
-            impact_level = "MEDIUM"
+        try:
+            impact_raw = c.get("impact", "MEDIUM") or "MEDIUM"
+            impact_level = impact_raw.split(" ")[0].split("—")[0].strip()
+            if impact_level not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+                impact_level = "MEDIUM"
 
-        final_changes.append(ChangeItem(
-            id=i + 1,
-            section=c.get("section", ""),
-            title=c.get("title", ""),
-            category=c.get("category", "MODIFIED"),
-            description=c.get("description", ""),
-            old_text=c.get("old_text"),
-            new_text=c.get("new_text"),
-            impact=c.get("impact", "MEDIUM"),
-            impact_level=impact_level,
-            manifest_item=c.get("manifest_item"),
-            verification_status=c.get("verification_status"),
-            verification_conclusion=c.get("verification_conclusion"),
-            verification_keywords=c.get("verification_keywords", []),
-            old_page=old_result["page_map"].get(i + 1),
-            new_page=new_result["page_map"].get(i + 1),
-        ))
+            final_changes.append(ChangeItem(
+                id=i + 1,
+                section=c.get("section", ""),
+                title=c.get("title", ""),
+                category=c.get("category", "MODIFIED"),
+                description=c.get("description", ""),
+                old_text=c.get("old_text"),
+                new_text=c.get("new_text"),
+                impact=impact_raw,
+                impact_level=impact_level,
+                manifest_item=c.get("manifest_item"),
+                verification_status=c.get("verification_status"),
+                verification_conclusion=c.get("verification_conclusion"),
+                verification_keywords=c.get("verification_keywords", []),
+                old_page=old_result["page_map"].get(i + 1),
+                new_page=new_result["page_map"].get(i + 1),
+            ))
+        except Exception as e:
+            print(f"[agent] Warning: skipping malformed change #{i+1}: {e}")
+            print(f"[agent] Change data type={type(c).__name__}, repr={repr(c)[:200]}")
+            continue
 
     # Compute summary
     by_category = {}

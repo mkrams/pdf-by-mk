@@ -7,6 +7,7 @@ import os
 import shutil
 import uuid
 import time
+import traceback
 from datetime import datetime
 from typing import Optional
 
@@ -142,11 +143,14 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
                 "message": f"Analysis complete: {result['total_changes']} changes found",
             })
     except Exception as e:
+        tb = traceback.format_exc()
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        print(f"[job {job_id}] FAILED:\n{tb}")
         jobs[job_id]["status"] = "failed"
-        jobs[job_id]["error"] = str(e)
+        jobs[job_id]["error"] = error_msg
         if job_id in progress_queues:
             await progress_queues[job_id].put({
-                "stage": "failed", "percent": 0, "message": str(e),
+                "stage": "failed", "percent": 0, "message": error_msg,
             })
 
 

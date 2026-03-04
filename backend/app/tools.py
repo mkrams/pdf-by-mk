@@ -244,9 +244,26 @@ def execute_tool(tool_name: str, tool_input: dict, job_context: dict) -> str:
 
         elif tool_name == "submit_changes":
             # Store changes in job context for the orchestrator to pick up
-            job_context["submitted_changes"] = tool_input.get("changes", [])
-            job_context["submitted_manifest"] = tool_input.get("manifest")
-            return json.dumps({"status": "submitted", "change_count": len(job_context["submitted_changes"])})
+            raw_changes = tool_input.get("changes", [])
+            # Defensive: ensure changes is a list of dicts
+            if isinstance(raw_changes, str):
+                try:
+                    raw_changes = json.loads(raw_changes)
+                except (json.JSONDecodeError, TypeError):
+                    raw_changes = []
+            if not isinstance(raw_changes, list):
+                raw_changes = []
+            # Filter out any non-dict items
+            validated = [c for c in raw_changes if isinstance(c, dict)]
+            job_context["submitted_changes"] = validated
+            raw_manifest = tool_input.get("manifest")
+            if isinstance(raw_manifest, str):
+                try:
+                    raw_manifest = json.loads(raw_manifest)
+                except (json.JSONDecodeError, TypeError):
+                    raw_manifest = None
+            job_context["submitted_manifest"] = raw_manifest
+            return json.dumps({"status": "submitted", "change_count": len(validated)})
 
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
