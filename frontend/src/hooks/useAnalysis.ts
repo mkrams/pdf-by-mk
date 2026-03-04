@@ -13,6 +13,7 @@ export function useAnalysis(jobId: string | null) {
   const [candidates, setCandidates] = useState<CandidateSummary[]>([]);
   const [analyzedCandidateIds, setAnalyzedCandidateIds] = useState<Set<string>>(new Set());
   const [analysisProgress, setAnalysisProgress] = useState<{ analyzed: number; total: number }>({ analyzed: 0, total: 0 });
+  const [activeCandidateId, setActiveCandidateId] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const isCompleteRef = useRef(false);
   const errorRef = useRef<string | null>(null);
@@ -86,6 +87,15 @@ export function useAnalysis(jobId: string | null) {
           console.log(`[useAnalysis] Received ${data.candidates?.length || 0} candidates`);
           setCandidates(data.candidates || []);
           setAnalysisProgress({ analyzed: 0, total: data.total || 0 });
+        } catch {}
+      });
+
+      // Listen for candidate analysis starting
+      es.addEventListener('candidate_started', (e) => {
+        if (cancelled) return;
+        try {
+          const data = JSON.parse(e.data);
+          setActiveCandidateId(data.candidate_id || null);
         } catch {}
       });
 
@@ -177,7 +187,7 @@ export function useAnalysis(jobId: string | null) {
     };
   }, [jobId, fetchResult]);
 
-  return { progress, streamingChanges, result, isComplete, error, pageCounts, candidates, analyzedCandidateIds, analysisProgress };
+  return { progress, streamingChanges, result, isComplete, error, pageCounts, candidates, analyzedCandidateIds, analysisProgress, activeCandidateId };
 }
 
 export async function startAnalysis(

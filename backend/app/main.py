@@ -156,10 +156,22 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
         if job_id in progress_queues:
             progress_queues[job_id].put(event_dict)
 
+    # Track which candidate is currently being analyzed (for streaming to frontend)
+    current_candidate_ref = [None]  # mutable for closure
+
     def emit_change(change_dict):
         """SYNC callback — called when a mini-agent classifies a change."""
         change_id_counter[0] += 1
         change_dict["id"] = change_id_counter[0]
+        # Inject page numbers from the candidate data for early navigation
+        cand = current_candidate_ref[0]
+        if cand:
+            old_pages = cand.get("old_pages", [])
+            new_pages = cand.get("new_pages", [])
+            if old_pages and not change_dict.get("old_page"):
+                change_dict["old_page"] = old_pages[0]
+            if new_pages and not change_dict.get("new_page"):
+                change_dict["new_page"] = new_pages[0]
         all_changes.append(change_dict)
 
         # Stream to frontend immediately
@@ -236,8 +248,19 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
                 elapsed=int(time.time() - start_time),
             ))
 
+            # Notify frontend which candidates are starting
+            for cand in batch:
+                current_candidate_ref[0] = cand
+                if job_id in progress_queues:
+                    progress_queues[job_id].put({
+                        "event_type": "candidate_started",
+                        "candidate_id": cand["id"],
+                        "candidate_title": cand.get("title", cand.get("section", "")),
+                    })
+
             # Run mini-agents in parallel within this batch
             async def run_one(cand):
+                current_candidate_ref[0] = cand
                 return await asyncio.to_thread(
                     run_mini_agent,
                     job_id, cand, page_cache, old_path, new_path, api_key, emit_change,
@@ -449,6 +472,9 @@ async def stream_progress(job_id: str):
             elif event_type == "candidates_list":
                 # Send full candidate list for upfront display
                 yield f"event: candidates_list\ndata: {json.dumps({'candidates': event.get('candidates', []), 'total': event.get('total', 0)})}\n\n"
+            elif event_type == "candidate_started":
+                # Notify which candidate is now being analyzed
+                yield f"event: candidate_started\ndata: {json.dumps({'candidate_id': event.get('candidate_id'), 'candidate_title': event.get('candidate_title', '')})}\n\n"
             elif event_type == "candidate_analyzed":
                 # Notify which candidate was just analyzed
                 yield f"event: candidate_analyzed\ndata: {json.dumps({'candidate_id': event.get('candidate_id'), 'analyzed_count': event.get('analyzed_count', 0), 'total_candidates': event.get('total_candidates', 0)})}\n\n"

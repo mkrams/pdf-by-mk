@@ -180,9 +180,18 @@ function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: s
 
 // ── Change List (left panel) ─────────────────────────────────────
 
+function Spinner() {
+  return (
+    <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24" fill="none">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  );
+}
+
 function ChangeList({
   changes, selectedId, onSelect, search, onSearch, catFilter, onCatFilter,
-  candidates, analyzedCandidateIds, isAnalyzing, analysisProgress,
+  candidates, analyzedCandidateIds, isAnalyzing, analysisProgress, activeCandidateId,
 }: {
   changes: ChangeItem[];
   selectedId: number | null;
@@ -193,6 +202,7 @@ function ChangeList({
   analyzedCandidateIds: Set<string>;
   isAnalyzing: boolean;
   analysisProgress: { analyzed: number; total: number };
+  activeCandidateId: string | null;
 }) {
   const cats = useMemo(() => [...new Set(changes.map(c => c.category))].sort(), [changes]);
 
@@ -202,10 +212,27 @@ function ChangeList({
     return true;
   }), [changes, catFilter, search]);
 
-  // Build set of sections that have confirmed changes
-  const confirmedSections = useMemo(() => new Set(changes.map(c => c.section)), [changes]);
+  // Build set of candidate IDs that resulted in confirmed changes
+  // We match by checking if any change's section matches the candidate's section
+  const confirmedCandidateIds = useMemo(() => {
+    const changeSections = new Set(changes.map(c => c.section));
+    const confirmed = new Set<string>();
+    for (const cand of candidates) {
+      if (changeSections.has(cand.section)) confirmed.add(cand.id);
+    }
+    return confirmed;
+  }, [changes, candidates]);
 
-  // Pending candidates = not yet analyzed, filter out ones matching search
+  // Rejected = analyzed but not confirmed
+  const rejectedCount = useMemo(() => {
+    let count = 0;
+    analyzedCandidateIds.forEach(id => {
+      if (!confirmedCandidateIds.has(id)) count++;
+    });
+    return count;
+  }, [analyzedCandidateIds, confirmedCandidateIds]);
+
+  // Pending candidates = not yet analyzed
   const pendingCandidates = useMemo(() => {
     if (!isAnalyzing) return [];
     return candidates.filter(c => {
@@ -215,34 +242,50 @@ function ChangeList({
     });
   }, [candidates, analyzedCandidateIds, isAnalyzing, search]);
 
-  // Analyzed but no change found (greyed out)
+  // Analyzed but no change found (rejected)
   const noChangeCandidates = useMemo(() => {
-    if (!isAnalyzing) return [];
     return candidates.filter(c => {
       if (!analyzedCandidateIds.has(c.id)) return false;
-      // Check if this candidate resulted in a confirmed change
-      if (confirmedSections.has(c.section)) return false;
+      if (confirmedCandidateIds.has(c.id)) return false;
       if (search && !`${c.title} ${c.section}`.toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     });
-  }, [candidates, analyzedCandidateIds, confirmedSections, isAnalyzing, search]);
+  }, [candidates, analyzedCandidateIds, confirmedCandidateIds, search]);
 
   return (
     <div className="w-72 min-w-[260px] border-r border-gray-200 dark:border-gray-700 flex flex-col bg-white dark:bg-gray-900 shrink-0">
       {/* Analysis progress header */}
-      {isAnalyzing && analysisProgress.total > 0 && (
+      {(isAnalyzing || candidates.length > 0) && analysisProgress.total > 0 && (
         <div className="px-3 py-2 border-b border-gray-200 dark:border-gray-700 bg-gradient-to-r from-cyan-50 to-blue-50 dark:from-cyan-950/30 dark:to-blue-950/30">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-700 dark:text-cyan-400">
-              Analyzing
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-700 dark:text-cyan-400 flex items-center gap-1.5">
+              {isAnalyzing && <Spinner />}
+              {isAnalyzing ? 'Analyzing' : 'Complete'}
             </span>
             <span className="text-[11px] font-mono font-bold text-cyan-600 dark:text-cyan-300">
               {analysisProgress.analyzed}/{analysisProgress.total}
             </span>
           </div>
-          <div className="w-full h-1 rounded-full bg-gray-200 dark:bg-gray-700">
-            <div className="h-1 rounded-full transition-all duration-500 bg-gradient-to-r from-cyan-400 to-blue-500"
+          <div className="w-full h-1.5 rounded-full bg-gray-200 dark:bg-gray-700 mb-2">
+            <div className="h-1.5 rounded-full transition-all duration-500 bg-gradient-to-r from-cyan-400 to-blue-500"
               style={{ width: `${Math.round((analysisProgress.analyzed / analysisProgress.total) * 100)}%` }} />
+          </div>
+          {/* Accept/reject counters */}
+          <div className="flex gap-3 text-[10px]">
+            <span className="flex items-center gap-1 text-green-600 dark:text-green-400 font-medium">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500" />
+              {changes.length} accepted
+            </span>
+            <span className="flex items-center gap-1 text-red-400 dark:text-red-500 font-medium">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-400" />
+              {rejectedCount} rejected
+            </span>
+            {pendingCandidates.length > 0 && (
+              <span className="flex items-center gap-1 text-gray-400 font-medium">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-gray-300 dark:bg-gray-600" />
+                {pendingCandidates.length} pending
+              </span>
+            )}
           </div>
         </div>
       )}
@@ -273,40 +316,54 @@ function ChangeList({
           </div>
         ))}
 
-        {/* Pending candidates (not yet analyzed) */}
-        {pendingCandidates.map(c => (
-          <div key={`pending-${c.id}`}
-            className="px-3 py-2 border-b border-gray-100 dark:border-gray-800 opacity-40">
-            <div className="flex items-start gap-1.5">
-              <span className="text-[10px] font-bold text-gray-400 mt-0.5">{c.id}</span>
-              <span className="text-xs font-medium text-gray-500 dark:text-gray-500 leading-tight">{c.title}</span>
+        {/* Pending candidates (not yet analyzed) — active one has spinner */}
+        {pendingCandidates.map(c => {
+          const isActive = c.id === activeCandidateId;
+          return (
+            <div key={`pending-${c.id}`}
+              className={`px-3 py-2 border-b border-gray-100 dark:border-gray-800 transition-all
+                ${isActive ? 'bg-cyan-50/50 dark:bg-cyan-950/20 opacity-70' : 'opacity-35'}`}>
+              <div className="flex items-start gap-1.5">
+                {isActive ? (
+                  <span className="mt-0.5 text-cyan-500"><Spinner /></span>
+                ) : (
+                  <span className="text-[10px] font-bold text-gray-400 mt-0.5">{c.id}</span>
+                )}
+                <span className={`text-xs leading-tight ${isActive ? 'font-medium text-cyan-700 dark:text-cyan-400' : 'font-medium text-gray-500 dark:text-gray-500'}`}>
+                  {c.title}
+                </span>
+              </div>
+              <div className="flex gap-1 mt-1 items-center">
+                <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium
+                  ${isActive
+                    ? 'bg-cyan-100 dark:bg-cyan-900/40 text-cyan-600 dark:text-cyan-400'
+                    : 'bg-gray-100 dark:bg-gray-800 text-gray-400'}`}>
+                  {isActive ? 'ANALYZING...' : 'PENDING'}
+                </span>
+                <span className="text-[10px] text-gray-400">{'\u00A7'}{c.section}</span>
+              </div>
             </div>
-            <div className="flex gap-1 mt-1 items-center">
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-400 font-medium">
-                PENDING
-              </span>
-              <span className="text-[10px] text-gray-400">{'\u00A7'}{c.section}</span>
-            </div>
-          </div>
-        ))}
+          );
+        })}
 
-        {/* Analyzed but no change found (dimmed) */}
+        {/* Analyzed but no change found (rejected — clearly marked) */}
         {noChangeCandidates.length > 0 && (
-          <div className="px-3 py-1.5 text-[10px] text-gray-400 dark:text-gray-600 uppercase tracking-wider border-b border-gray-100 dark:border-gray-800">
-            No change found ({noChangeCandidates.length})
+          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider border-b border-gray-100 dark:border-gray-800 flex items-center gap-1.5">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-300 dark:bg-red-800" />
+            <span className="text-red-400 dark:text-red-600 font-bold">Rejected ({noChangeCandidates.length})</span>
           </div>
         )}
         {noChangeCandidates.map(c => (
           <div key={`done-${c.id}`}
-            className="px-3 py-1.5 border-b border-gray-100 dark:border-gray-800 opacity-25">
+            className="px-3 py-1.5 border-b border-gray-100 dark:border-gray-800 bg-red-50/30 dark:bg-red-950/10">
             <div className="flex items-start gap-1.5">
-              <span className="text-[10px] text-gray-400 mt-0.5 line-through">{c.id}</span>
-              <span className="text-[11px] text-gray-400 dark:text-gray-600 leading-tight line-through">{c.section}</span>
+              <span className="text-[10px] text-red-300 dark:text-red-800 mt-0.5 line-through">{c.id}</span>
+              <span className="text-[11px] text-red-300 dark:text-red-800 leading-tight line-through">{c.title || c.section}</span>
             </div>
           </div>
         ))}
 
-        {filtered.length === 0 && pendingCandidates.length === 0 && (
+        {filtered.length === 0 && pendingCandidates.length === 0 && noChangeCandidates.length === 0 && (
           <div className="p-4 text-sm text-gray-400 text-center">No changes match filters</div>
         )}
       </div>
@@ -551,7 +608,7 @@ function PageImage({ jobId, which, pageNum }: { jobId: string; which: string; pa
 
 export default function ViewerPage() {
   const { jobId } = useParams<{ jobId: string }>();
-  const { progress, streamingChanges, result, isComplete, error, pageCounts, candidates, analyzedCandidateIds, analysisProgress } = useAnalysis(jobId || null);
+  const { progress, streamingChanges, result, isComplete, error, pageCounts, candidates, analyzedCandidateIds, analysisProgress, activeCandidateId } = useAnalysis(jobId || null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
   const [catFilter, setCatFilter] = useState('');
@@ -668,6 +725,7 @@ export default function ViewerPage() {
             analyzedCandidateIds={analyzedCandidateIds}
             isAnalyzing={isAnalyzing}
             analysisProgress={analysisProgress}
+            activeCandidateId={activeCandidateId}
           />
 
           {/* Center: change detail */}
