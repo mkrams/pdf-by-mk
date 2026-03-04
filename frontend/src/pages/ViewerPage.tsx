@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { useAnalysis } from '../hooks/useAnalysis';
-import type { ChangeItem, ProgressEvent } from '../types';
+import type { ChangeItem, ProgressEvent, CandidateSummary } from '../types';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -46,11 +46,6 @@ function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: s
   const elapsedSecs = Math.floor((now - startRef.current) / 1000);
   const mins = Math.floor(elapsedSecs / 60);
   const secs = elapsedSecs % 60;
-  const currentTurn = latest?.turn || 0;
-  const maxTurns = latest?.max_turns || 20;
-  const tokens = latest?.tokens || 0;
-  const tokensStr = tokens > 0 ? tokens.toLocaleString() : '0';
-
   // Progress bar: based on elapsed time (typical analysis is 3-7 min)
   const timePct = Math.min(90, Math.round((elapsedSecs / 360) * 90));
   const pct = latest?.stage === 'complete' ? 100 : Math.max(timePct, latest?.percent || 0);
@@ -128,25 +123,13 @@ function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: s
                 You can close this tab — analysis continues on the server
               </p>
 
-              {/* Stats row */}
-              <div className="flex justify-center gap-6 mb-6">
+              {/* Stats row — elapsed time only */}
+              <div className="flex justify-center mb-6">
                 <div className="text-center">
-                  <div className="text-2xl font-mono font-bold" style={{ color: '#ff2d95' }}>
+                  <div className="text-3xl font-mono font-bold" style={{ color: '#ff2d95' }}>
                     {mins}:{secs.toString().padStart(2, '0')}
                   </div>
                   <div className="text-[10px] text-white/30 uppercase tracking-wider">Elapsed</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-2xl font-mono font-bold" style={{ color: '#00e5ff' }}>
-                    {currentTurn}<span style={{ color: 'rgba(255,255,255,0.2)' }}>/{maxTurns}</span>
-                  </div>
-                  <div className="text-[10px] text-white/30 uppercase tracking-wider">AI Steps</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-2xl font-mono font-bold" style={{ color: '#ffb347' }}>
-                    {tokensStr}
-                  </div>
-                  <div className="text-[10px] text-white/30 uppercase tracking-wider">Tokens</div>
                 </div>
               </div>
 
@@ -199,12 +182,17 @@ function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: s
 
 function ChangeList({
   changes, selectedId, onSelect, search, onSearch, catFilter, onCatFilter,
+  candidates, analyzedCandidateIds, isAnalyzing, analysisProgress,
 }: {
   changes: ChangeItem[];
   selectedId: number | null;
   onSelect: (id: number) => void;
   search: string; onSearch: (s: string) => void;
   catFilter: string; onCatFilter: (s: string) => void;
+  candidates: CandidateSummary[];
+  analyzedCandidateIds: Set<string>;
+  isAnalyzing: boolean;
+  analysisProgress: { analyzed: number; total: number };
 }) {
   const cats = useMemo(() => [...new Set(changes.map(c => c.category))].sort(), [changes]);
 
@@ -214,8 +202,51 @@ function ChangeList({
     return true;
   }), [changes, catFilter, search]);
 
+  // Build set of sections that have confirmed changes
+  const confirmedSections = useMemo(() => new Set(changes.map(c => c.section)), [changes]);
+
+  // Pending candidates = not yet analyzed, filter out ones matching search
+  const pendingCandidates = useMemo(() => {
+    if (!isAnalyzing) return [];
+    return candidates.filter(c => {
+      if (analyzedCandidateIds.has(c.id)) return false;
+      if (search && !`${c.title} ${c.section}`.toLowerCase().includes(search.toLowerCase())) return false;
+      return true;
+    });
+  }, [candidates, analyzedCandidateIds, isAnalyzing, search]);
+
+  // Analyzed but no change found (greyed out)
+  const noChangeCandidates = useMemo(() => {
+    if (!isAnalyzing) return [];
+    return candidates.filter(c => {
+      if (!analyzedCandidateIds.has(c.id)) return false;
+      // Check if this candidate resulted in a confirmed change
+      if (confirmedSections.has(c.section)) return false;
+      if (search && !`${c.title} ${c.section}`.toLowerCase().includes(search.toLowerCase())) return false;
+      return true;
+    });
+  }, [candidates, analyzedCandidateIds, confirmedSections, isAnalyzing, search]);
+
   return (
     <div className="w-72 min-w-[260px] border-r border-gray-200 dark:border-gray-700 flex flex-col bg-white dark:bg-gray-900 shrink-0">
+      {/* Analysis progress header */}
+      {isAnalyzing && analysisProgress.total > 0 && (
+        <div className="px-3 py-2 border-b border-gray-200 dark:border-gray-700 bg-gradient-to-r from-cyan-50 to-blue-50 dark:from-cyan-950/30 dark:to-blue-950/30">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-700 dark:text-cyan-400">
+              Analyzing
+            </span>
+            <span className="text-[11px] font-mono font-bold text-cyan-600 dark:text-cyan-300">
+              {analysisProgress.analyzed}/{analysisProgress.total}
+            </span>
+          </div>
+          <div className="w-full h-1 rounded-full bg-gray-200 dark:bg-gray-700">
+            <div className="h-1 rounded-full transition-all duration-500 bg-gradient-to-r from-cyan-400 to-blue-500"
+              style={{ width: `${Math.round((analysisProgress.analyzed / analysisProgress.total) * 100)}%` }} />
+          </div>
+        </div>
+      )}
+
       <div className="p-2 border-b border-gray-200 dark:border-gray-700 space-y-1">
         <input type="text" value={search} onChange={e => onSearch(e.target.value)}
           placeholder="Search changes..." className="w-full px-2 py-1.5 text-xs border rounded bg-gray-50 dark:bg-gray-800 dark:text-gray-200 dark:border-gray-600" />
@@ -226,6 +257,7 @@ function ChangeList({
         </select>
       </div>
       <div className="flex-1 overflow-y-auto">
+        {/* Confirmed changes */}
         {filtered.map(c => (
           <div key={c.id} onClick={() => onSelect(c.id)}
             className={`px-3 py-2 border-b border-gray-100 dark:border-gray-800 cursor-pointer transition-colors
@@ -240,7 +272,43 @@ function ChangeList({
             </div>
           </div>
         ))}
-        {filtered.length === 0 && <div className="p-4 text-sm text-gray-400 text-center">No changes match filters</div>}
+
+        {/* Pending candidates (not yet analyzed) */}
+        {pendingCandidates.map(c => (
+          <div key={`pending-${c.id}`}
+            className="px-3 py-2 border-b border-gray-100 dark:border-gray-800 opacity-40">
+            <div className="flex items-start gap-1.5">
+              <span className="text-[10px] font-bold text-gray-400 mt-0.5">{c.id}</span>
+              <span className="text-xs font-medium text-gray-500 dark:text-gray-500 leading-tight">{c.title}</span>
+            </div>
+            <div className="flex gap-1 mt-1 items-center">
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-400 font-medium">
+                PENDING
+              </span>
+              <span className="text-[10px] text-gray-400">{'\u00A7'}{c.section}</span>
+            </div>
+          </div>
+        ))}
+
+        {/* Analyzed but no change found (dimmed) */}
+        {noChangeCandidates.length > 0 && (
+          <div className="px-3 py-1.5 text-[10px] text-gray-400 dark:text-gray-600 uppercase tracking-wider border-b border-gray-100 dark:border-gray-800">
+            No change found ({noChangeCandidates.length})
+          </div>
+        )}
+        {noChangeCandidates.map(c => (
+          <div key={`done-${c.id}`}
+            className="px-3 py-1.5 border-b border-gray-100 dark:border-gray-800 opacity-25">
+            <div className="flex items-start gap-1.5">
+              <span className="text-[10px] text-gray-400 mt-0.5 line-through">{c.id}</span>
+              <span className="text-[11px] text-gray-400 dark:text-gray-600 leading-tight line-through">{c.section}</span>
+            </div>
+          </div>
+        ))}
+
+        {filtered.length === 0 && pendingCandidates.length === 0 && (
+          <div className="p-4 text-sm text-gray-400 text-center">No changes match filters</div>
+        )}
       </div>
     </div>
   );
@@ -336,7 +404,7 @@ function PdfPageViewer({
     return () => container.removeEventListener('scroll', handleScroll);
   }, [totalPages]);
 
-  // Pages to actually render (visible range + target page neighborhood)
+  // Pages to actually render (visible range + target page neighborhood only)
   const pagesToRender = useMemo(() => {
     const pages = new Set<number>();
     for (let p = visibleRange[0]; p <= visibleRange[1]; p++) pages.add(p);
@@ -345,8 +413,8 @@ function PdfPageViewer({
       pages.add(targetPage);
       pages.add(Math.min(totalPages, targetPage + 1));
     }
-    // Always load first few pages
-    for (let p = 1; p <= Math.min(3, totalPages); p++) pages.add(p);
+    // Only load page 1 initially (not first 3)
+    pages.add(1);
     return pages;
   }, [visibleRange, targetPage, totalPages]);
 
@@ -483,7 +551,7 @@ function PageImage({ jobId, which, pageNum }: { jobId: string; which: string; pa
 
 export default function ViewerPage() {
   const { jobId } = useParams<{ jobId: string }>();
-  const { progress, streamingChanges, result, isComplete, error, pageCounts } = useAnalysis(jobId || null);
+  const { progress, streamingChanges, result, isComplete, error, pageCounts, candidates, analyzedCandidateIds, analysisProgress } = useAnalysis(jobId || null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
   const [catFilter, setCatFilter] = useState('');
@@ -547,8 +615,8 @@ export default function ViewerPage() {
 
   if (!jobId) return <div className="p-8">No job ID</div>;
 
-  // Determine what to show — show results panel if we have any changes (including streaming)
-  const hasResults = changes.length > 0;
+  // Determine what to show — show results panel if we have any changes OR candidates
+  const hasResults = changes.length > 0 || candidates.length > 0;
 
   return (
     <div className={`h-screen flex flex-col ${dark ? 'dark' : ''}`}>
@@ -596,6 +664,10 @@ export default function ViewerPage() {
             onSelect={setSelectedId}
             search={search} onSearch={setSearch}
             catFilter={catFilter} onCatFilter={setCatFilter}
+            candidates={candidates}
+            analyzedCandidateIds={analyzedCandidateIds}
+            isAnalyzing={isAnalyzing}
+            analysisProgress={analysisProgress}
           />
 
           {/* Center: change detail */}

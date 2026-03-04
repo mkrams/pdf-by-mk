@@ -51,3 +51,10 @@ export interface ProgressEvent {
   old_pages_count?: number;
   new_pages_count?: number;
 }
+
+export interface CandidateSummary {
+  id: string;
+  section: string;
+  title: string;
+  category_hint: string;
+}

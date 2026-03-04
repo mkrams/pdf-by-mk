@@ -125,7 +125,16 @@ async def start_analysis_endpoint(
     }
 
 
-MINI_AGENT_BATCH_SIZE = 2  # How many mini-agents to run in parallel (kept low for Railway memory)
+MINI_AGENT_BATCH_SIZE = 1  # Sequential mini-agents to minimize Railway memory usage
+
+# Semaphore to limit concurrent page image renders (prevents OOM from burst of page requests)
+_page_render_semaphore: asyncio.Semaphore | None = None
+
+def _get_page_semaphore() -> asyncio.Semaphore:
+    global _page_render_semaphore
+    if _page_render_semaphore is None:
+        _page_render_semaphore = asyncio.Semaphore(2)  # Max 2 concurrent page renders
+    return _page_render_semaphore
 
 
 async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
@@ -178,6 +187,18 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
         print(f"[job {job_id}] Phase 1 complete: {len(candidates)} candidates, "
               f"{len(page_cache)} pages cached")
 
+        # Send candidate list to frontend so it can show all candidates upfront
+        if candidates and job_id in progress_queues:
+            candidate_summaries = [
+                {"id": c["id"], "section": c["section"], "title": c["title"], "category_hint": c.get("category_hint", "MODIFIED")}
+                for c in candidates
+            ]
+            progress_queues[job_id].put({
+                "event_type": "candidates_list",
+                "candidates": candidate_summaries,
+                "total": len(candidates),
+            })
+
         if not candidates:
             # No changes found — still complete successfully
             progress_cb(ProgressEvent(
@@ -227,14 +248,25 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
                 return_exceptions=True,
             )
 
-            # Process results
-            for result in results:
+            # Process results and notify frontend which candidates were analyzed
+            for i, result in enumerate(results):
+                cand_id = batch[i]["id"] if i < len(batch) else "?"
                 if isinstance(result, Exception):
                     print(f"[job {job_id}] Mini-agent exception: {result}")
-                    continue
-                total_tokens += result.get("tokens_used", 0)
-                if result.get("error"):
-                    print(f"[job {job_id}] Mini-agent {result['agent_id']} error: {result['error']}")
+                else:
+                    total_tokens += result.get("tokens_used", 0)
+                    if result.get("error"):
+                        print(f"[job {job_id}] Mini-agent {result['agent_id']} error: {result['error']}")
+
+                # Notify frontend this candidate was analyzed
+                analyzed_count = batch_num * MINI_AGENT_BATCH_SIZE + i + 1
+                if job_id in progress_queues:
+                    progress_queues[job_id].put({
+                        "event_type": "candidate_analyzed",
+                        "candidate_id": cand_id,
+                        "analyzed_count": min(analyzed_count, len(candidates)),
+                        "total_candidates": len(candidates),
+                    })
 
             # Free page cache entries consumed by this batch to reduce memory
             for cand in batch:
@@ -414,6 +446,12 @@ async def stream_progress(job_id: str):
             if event_type == "change_found":
                 # Stream individual change to frontend
                 yield f"event: change_found\ndata: {json.dumps(event.get('change', {}))}\n\n"
+            elif event_type == "candidates_list":
+                # Send full candidate list for upfront display
+                yield f"event: candidates_list\ndata: {json.dumps({'candidates': event.get('candidates', []), 'total': event.get('total', 0)})}\n\n"
+            elif event_type == "candidate_analyzed":
+                # Notify which candidate was just analyzed
+                yield f"event: candidate_analyzed\ndata: {json.dumps({'candidate_id': event.get('candidate_id'), 'analyzed_count': event.get('analyzed_count', 0), 'total_candidates': event.get('total_candidates', 0)})}\n\n"
             elif stage == "complete":
                 yield f"event: complete\ndata: {json.dumps(event)}\n\n"
                 break
@@ -541,13 +579,20 @@ async def serve_page_image(job_id: str, which: str, page_num: int):
     if cache_key in _page_cache[job_id]:
         png_bytes = _page_cache[job_id][cache_key]
     else:
-        try:
-            png_bytes = await asyncio.to_thread(render_page_image, path, page_num, 150)
-            _page_cache[job_id][cache_key] = png_bytes
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        except Exception as e:
-            raise HTTPException(500, f"Failed to render page: {str(e)}")
+        # Use semaphore to limit concurrent renders (prevents OOM from burst requests)
+        sem = _get_page_semaphore()
+        async with sem:
+            # Double-check cache after acquiring semaphore
+            if cache_key in _page_cache.get(job_id, {}):
+                png_bytes = _page_cache[job_id][cache_key]
+            else:
+                try:
+                    png_bytes = await asyncio.to_thread(render_page_image, path, page_num, 120)
+                    _page_cache[job_id][cache_key] = png_bytes
+                except ValueError as e:
+                    raise HTTPException(400, str(e))
+                except Exception as e:
+                    raise HTTPException(500, f"Failed to render page: {str(e)}")
 
     return Response(
         content=png_bytes,

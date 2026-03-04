@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { AnalysisResult, ProgressEvent, ChangeItem } from '../types';
+import type { AnalysisResult, ProgressEvent, ChangeItem, CandidateSummary } from '../types';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -10,6 +10,9 @@ export function useAnalysis(jobId: string | null) {
   const [isComplete, setIsComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pageCounts, setPageCounts] = useState<{ old: number; new: number }>({ old: 0, new: 0 });
+  const [candidates, setCandidates] = useState<CandidateSummary[]>([]);
+  const [analyzedCandidateIds, setAnalyzedCandidateIds] = useState<Set<string>>(new Set());
+  const [analysisProgress, setAnalysisProgress] = useState<{ analyzed: number; total: number }>({ analyzed: 0, total: 0 });
   const esRef = useRef<EventSource | null>(null);
   const isCompleteRef = useRef(false);
   const errorRef = useRef<string | null>(null);
@@ -75,7 +78,28 @@ export function useAnalysis(jobId: string | null) {
         } catch {}
       });
 
-      // NEW: Listen for individual changes streaming in
+      // Listen for full candidate list from orchestrator
+      es.addEventListener('candidates_list', (e) => {
+        if (cancelled) return;
+        try {
+          const data = JSON.parse(e.data);
+          console.log(`[useAnalysis] Received ${data.candidates?.length || 0} candidates`);
+          setCandidates(data.candidates || []);
+          setAnalysisProgress({ analyzed: 0, total: data.total || 0 });
+        } catch {}
+      });
+
+      // Listen for candidate analysis completion
+      es.addEventListener('candidate_analyzed', (e) => {
+        if (cancelled) return;
+        try {
+          const data = JSON.parse(e.data);
+          setAnalyzedCandidateIds(prev => new Set([...prev, data.candidate_id]));
+          setAnalysisProgress({ analyzed: data.analyzed_count || 0, total: data.total_candidates || 0 });
+        } catch {}
+      });
+
+      // Listen for individual changes streaming in
       es.addEventListener('change_found', (e) => {
         if (cancelled) return;
         try {
@@ -153,7 +177,7 @@ export function useAnalysis(jobId: string | null) {
     };
   }, [jobId, fetchResult]);
 
-  return { progress, streamingChanges, result, isComplete, error, pageCounts };
+  return { progress, streamingChanges, result, isComplete, error, pageCounts, candidates, analyzedCandidateIds, analysisProgress };
 }
 
 export async function startAnalysis(
