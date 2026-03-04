@@ -105,8 +105,11 @@ export function useAnalysis(jobId: string | null) {
         if (cancelled) return;
         try {
           const data = JSON.parse(e.data);
-          setAnalyzedCandidateIds(prev => new Set([...prev, data.candidate_id]));
-          if (!data.had_change) {
+          // had_change: true = accepted, false = rejected, null = uncertain (pending pass 2)
+          if (data.had_change !== null) {
+            setAnalyzedCandidateIds(prev => new Set([...prev, data.candidate_id]));
+          }
+          if (data.had_change === false) {
             setRejectedCandidateIds(prev => new Set([...prev, data.candidate_id]));
           }
           setAnalysisProgress({ analyzed: data.analyzed_count || 0, total: data.total_candidates || 0 });

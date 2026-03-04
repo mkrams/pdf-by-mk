@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, Response
 
 from .config import CORS_ORIGINS, UPLOAD_DIR, MAX_FILE_SIZE, JOB_EXPIRY_SECONDS
 from .orchestrator import run_orchestrator
-from .mini_agent import run_mini_agent
+from .mini_agent import run_mini_agent_pass1, run_mini_agent_pass2
 from .models import ProgressEvent, ChangeItem
 from .pdf_utils import render_page_image, get_page_count, annotate_pdf
 
@@ -229,11 +229,18 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
                 })
             return
 
-        # ── PHASE 2: MINI-AGENTS ───────────────────────────────────────
+        # ── PHASE 2a: PASS 1 — Sonnet fast triage ─────────────────────
         jobs[job_id]["phase"] = "mini_agents"
-        print(f"[job {job_id}] Phase 2: Running {len(candidates)} mini-agents...")
+        print(f"[job {job_id}] Phase 2a: Pass 1 (Sonnet) — {len(candidates)} candidates...")
 
-        # Batch candidates for parallel execution
+        # Get page counts for pass 2 extended context
+        from .pdf_utils import get_page_count as _gpc
+        old_page_count = _gpc(old_path)
+        new_page_count = _gpc(new_path)
+
+        uncertain_candidates = []  # (candidate, pass1_result) for pass 2
+        analyzed_count = 0
+
         batches = [
             candidates[i:i + MINI_AGENT_BATCH_SIZE]
             for i in range(0, len(candidates), MINI_AGENT_BATCH_SIZE)
@@ -242,8 +249,8 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
         for batch_num, batch in enumerate(batches):
             progress_cb(ProgressEvent(
                 stage="mini_agents",
-                percent=20 + int((batch_num / len(batches)) * 60),
-                message=f"Analyzing batch {batch_num + 1} of {len(batches)} "
+                percent=20 + int((batch_num / len(batches)) * 45),
+                message=f"Pass 1: Batch {batch_num + 1}/{len(batches)} "
                         f"({len(all_changes)} changes found so far)",
                 changes_found=len(all_changes),
                 candidates_found=len(candidates),
@@ -259,53 +266,125 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
                         "candidate_title": cand.get("title", cand.get("section", "")),
                     })
 
-            # Run mini-agents in parallel within this batch
-            async def run_one(cand):
+            # Run pass 1 in parallel within this batch
+            async def run_pass1(cand):
                 return await asyncio.to_thread(
-                    run_mini_agent,
-                    job_id, cand, page_cache, old_path, new_path, api_key, make_emit_change(cand),
+                    run_mini_agent_pass1,
+                    job_id, cand, page_cache, api_key,
                 )
 
             results = await asyncio.gather(
-                *[run_one(cand) for cand in batch],
+                *[run_pass1(cand) for cand in batch],
                 return_exceptions=True,
             )
 
-            # Process results and notify frontend which candidates were analyzed
             for i, result in enumerate(results):
-                cand_id = batch[i]["id"] if i < len(batch) else "?"
+                cand = batch[i]
+                cand_id = cand["id"]
+                analyzed_count += 1
+
                 if isinstance(result, Exception):
-                    print(f"[job {job_id}] Mini-agent exception: {result}")
+                    print(f"[job {job_id}] Pass 1 exception for {cand_id}: {result}")
+                    # Treat exceptions as uncertain — let Opus retry
+                    uncertain_candidates.append((cand, {
+                        "notes": f"Pass 1 exception: {result}",
+                        "reason": str(result),
+                    }))
+                    had_change = False
                 else:
                     total_tokens += result.get("tokens_used", 0)
-                    if result.get("error"):
-                        print(f"[job {job_id}] Mini-agent {result['agent_id']} error: {result['error']}")
+                    decision = result.get("decision", "UNCERTAIN")
 
-                # Determine if this candidate produced a change or was rejected
-                had_change = False
-                if not isinstance(result, Exception) and result and result.get("change"):
-                    had_change = True
+                    if decision == "SAVE":
+                        change = result["change"]
+                        # Emit change to frontend
+                        make_emit_change(cand)(change)
+                        had_change = True
+                    elif decision == "UNCERTAIN":
+                        uncertain_candidates.append((cand, result))
+                        had_change = False
+                    else:  # FALSE_POSITIVE
+                        had_change = False
 
-                # Notify frontend this candidate was analyzed
-                analyzed_count = batch_num * MINI_AGENT_BATCH_SIZE + i + 1
                 if job_id in progress_queues:
                     progress_queues[job_id].put({
                         "event_type": "candidate_analyzed",
                         "candidate_id": cand_id,
-                        "had_change": had_change,
+                        "had_change": had_change if not isinstance(result, Exception) and result.get("decision") != "UNCERTAIN" else None,
                         "analyzed_count": min(analyzed_count, len(candidates)),
                         "total_candidates": len(candidates),
                     })
 
-            # Free page cache entries consumed by this batch to reduce memory
-            for cand in batch:
-                for p in cand.get("old_pages", []):
-                    page_cache.pop(("old", p), None)
-                for p in cand.get("new_pages", []):
-                    page_cache.pop(("new", p), None)
+            print(f"[job {job_id}] Pass 1 batch {batch_num + 1}/{len(batches)} done. "
+                  f"Changes: {len(all_changes)}, Uncertain: {len(uncertain_candidates)}")
 
-            print(f"[job {job_id}] Batch {batch_num + 1}/{len(batches)} done. "
-                  f"Changes so far: {len(all_changes)}")
+        print(f"[job {job_id}] Pass 1 complete: {len(all_changes)} saved, "
+              f"{len(uncertain_candidates)} uncertain, "
+              f"{len(candidates) - len(all_changes) - len(uncertain_candidates)} rejected")
+
+        # ── PHASE 2b: PASS 2 — Opus deep analysis for uncertain ──────
+        if uncertain_candidates:
+            jobs[job_id]["phase"] = "opus_review"
+            print(f"[job {job_id}] Phase 2b: Pass 2 (Opus) — {len(uncertain_candidates)} uncertain candidates...")
+
+            opus_batches = [
+                uncertain_candidates[i:i + MINI_AGENT_BATCH_SIZE]
+                for i in range(0, len(uncertain_candidates), MINI_AGENT_BATCH_SIZE)
+            ]
+
+            for batch_num, batch in enumerate(opus_batches):
+                progress_cb(ProgressEvent(
+                    stage="opus_review",
+                    percent=65 + int((batch_num / len(opus_batches)) * 15),
+                    message=f"Pass 2 (Opus): Batch {batch_num + 1}/{len(opus_batches)} "
+                            f"({len(all_changes)} changes found so far)",
+                    changes_found=len(all_changes),
+                    candidates_found=len(candidates),
+                    elapsed=int(time.time() - start_time),
+                ))
+
+                async def run_pass2(item):
+                    cand, p1_result = item
+                    return cand, await asyncio.to_thread(
+                        run_mini_agent_pass2,
+                        job_id, cand, p1_result, page_cache,
+                        old_path, new_path,
+                        old_page_count, new_page_count, api_key,
+                    )
+
+                results = await asyncio.gather(
+                    *[run_pass2(item) for item in batch],
+                    return_exceptions=True,
+                )
+
+                for result in results:
+                    if isinstance(result, Exception):
+                        print(f"[job {job_id}] Pass 2 exception: {result}")
+                        continue
+
+                    cand, p2_result = result
+                    cand_id = cand["id"]
+                    total_tokens += p2_result.get("tokens_used", 0)
+
+                    had_change = False
+                    if p2_result.get("change"):
+                        make_emit_change(cand)(p2_result["change"])
+                        had_change = True
+
+                    # Update frontend: this candidate now has a final answer
+                    if job_id in progress_queues:
+                        progress_queues[job_id].put({
+                            "event_type": "candidate_analyzed",
+                            "candidate_id": cand_id,
+                            "had_change": had_change,
+                            "analyzed_count": analyzed_count,  # already at total from pass 1
+                            "total_candidates": len(candidates),
+                        })
+
+                print(f"[job {job_id}] Pass 2 batch {batch_num + 1}/{len(opus_batches)} done. "
+                      f"Changes so far: {len(all_changes)}")
+
+            print(f"[job {job_id}] Pass 2 complete: {len(all_changes)} total changes")
 
         print(f"[job {job_id}] Phase 2 complete: {len(all_changes)} changes classified, "
               f"{total_tokens:,} tokens total")
