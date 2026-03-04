@@ -396,6 +396,9 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
         # ── PHASE 2c: DEDUP — merge ADD+REMOVE pairs (renumbering) ────
         all_changes = _dedup_renumbered_changes(all_changes, job_id)
 
+        # ── PHASE 2d: RECLASSIFY — catch MODIFIED that are actually relocations ─
+        all_changes = _reclassify_relocated_changes(all_changes, job_id)
+
         # ── PHASE 3: ANNOTATION ────────────────────────────────────────
         jobs[job_id]["phase"] = "annotation"
         progress_cb(ProgressEvent(
@@ -608,6 +611,125 @@ def _dedup_renumbered_changes(changes: list[dict], job_id: str) -> list[dict]:
         for idx, c in enumerate(changes, 1):
             c["id"] = idx
         print(f"[job {job_id}] Dedup: merged {len(merged_ids)} pairs, {len(changes)} changes remaining")
+
+    return changes
+
+
+def _reclassify_relocated_changes(changes: list[dict], job_id: str) -> list[dict]:
+    """
+    Catch MODIFIED changes that are actually relocations.
+
+    When a mini-agent sees completely different content at the same section number
+    and classifies it as MODIFIED with descriptions like "complete replacement" or
+    "entirely different", this is usually a relocation, not a real content change.
+
+    Heuristics:
+    1. If old_text and new_text are very dissimilar (< 0.2), suspect relocation
+    2. If description contains relocation keywords, reclassify
+    3. Cross-match: if this change's old_text matches another change's new_text
+       (or vice versa), it's a relocation
+    """
+    from difflib import SequenceMatcher
+    import re
+
+    relocation_keywords = re.compile(
+        r'(complete(?:ly)?\s+replace|entirely\s+(?:different|new|replace)|'
+        r'wholesale\s+(?:change|replace)|fundamentally\s+(?:different|change)|'
+        r'bears?\s+no\s+resemblance|no\s+longer\s+(?:contains?|includes?)|'
+        r'totally\s+(?:different|new|replace)|'
+        r'(?:all|entire)\s+content\s+(?:replaced|changed|different))',
+        re.IGNORECASE
+    )
+
+    modified_changes = [
+        c for c in changes
+        if c.get("category", "").upper() == "MODIFIED"
+    ]
+
+    if not modified_changes:
+        return changes
+
+    reclassified = 0
+    for c in modified_changes:
+        old_text = (c.get("old_text") or "").strip()
+        new_text = (c.get("new_text") or "").strip()
+        description = c.get("description", "")
+        title = c.get("title", "")
+
+        # Check 1: Very low text similarity between old and new quotes
+        if old_text and new_text and len(old_text) > 20 and len(new_text) > 20:
+            sim = SequenceMatcher(None, old_text.lower(), new_text.lower()).ratio()
+            if sim < 0.15:
+                # Content is almost entirely different — likely relocation
+                c["category"] = "STRUCTURAL"
+                c["title"] = f"Relocated/renumbered: {c.get('section', '')}"
+                c["description"] = (
+                    f"Content at this section number changed completely due to "
+                    f"document restructuring (old/new similarity: {sim:.0%}). "
+                    + description
+                )
+                c["impact"] = re.sub(
+                    r'^(CRITICAL|HIGH)',
+                    'MEDIUM',
+                    c.get("impact", "MEDIUM — Document restructuring")
+                )
+                reclassified += 1
+                print(f"[job {job_id}] Reclassify: #{c.get('id')} '{c.get('section')}' "
+                      f"MODIFIED→STRUCTURAL (text sim={sim:.0%})")
+                continue
+
+        # Check 2: Description contains relocation language
+        if relocation_keywords.search(description) or relocation_keywords.search(title):
+            c["category"] = "STRUCTURAL"
+            if "relocat" not in c.get("title", "").lower() and "renumber" not in c.get("title", "").lower():
+                c["title"] = f"Relocated/renumbered: {c.get('section', '')}"
+            c["impact"] = re.sub(
+                r'^(CRITICAL|HIGH)',
+                'MEDIUM',
+                c.get("impact", "MEDIUM — Document restructuring")
+            )
+            reclassified += 1
+            print(f"[job {job_id}] Reclassify: #{c.get('id')} '{c.get('section')}' "
+                  f"MODIFIED→STRUCTURAL (description keywords)")
+            continue
+
+    # Check 3: Cross-match old_text/new_text across all changes
+    # If change A's old_text closely matches change B's new_text, both are relocations
+    all_old_texts = {}  # id → old_text
+    all_new_texts = {}  # id → new_text
+    for c in changes:
+        cid = c.get("id")
+        if c.get("old_text") and len(c["old_text"]) > 30:
+            all_old_texts[cid] = c["old_text"]
+        if c.get("new_text") and len(c["new_text"]) > 30:
+            all_new_texts[cid] = c["new_text"]
+
+    for c in changes:
+        if c.get("category", "").upper() != "MODIFIED":
+            continue
+        cid = c.get("id")
+        old_text = all_old_texts.get(cid, "")
+        new_text = all_new_texts.get(cid, "")
+
+        if old_text:
+            for other_id, other_new in all_new_texts.items():
+                if other_id == cid:
+                    continue
+                sim = SequenceMatcher(None, old_text[:300].lower(), other_new[:300].lower()).ratio()
+                if sim > 0.5:
+                    c["category"] = "STRUCTURAL"
+                    c["title"] = f"Relocated/renumbered: {c.get('section', '')}"
+                    c["impact"] = re.sub(
+                        r'^(CRITICAL|HIGH)', 'MEDIUM',
+                        c.get("impact", "MEDIUM — Document restructuring")
+                    )
+                    reclassified += 1
+                    print(f"[job {job_id}] Reclassify: #{cid} '{c.get('section')}' "
+                          f"MODIFIED→STRUCTURAL (old_text matches #{other_id} new_text, sim={sim:.0%})")
+                    break
+
+    if reclassified:
+        print(f"[job {job_id}] Reclassified {reclassified} MODIFIED→STRUCTURAL changes")
 
     return changes
 

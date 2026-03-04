@@ -132,6 +132,12 @@ def run_orchestrator(
     if skipped_high_sim:
         print(f"[orchestrator {job_id}] Skipped {skipped_high_sim} near-identical sections (>95% similar)")
 
+    # ── Step 2a: Detect relocations (content at same number but different) ─
+    # When a document is majorly restructured, "Table 2" old might have completely
+    # different content than "Table 2" new because everything shifted. Detect this
+    # by cross-matching low-similarity MODIFIED diffs against all other diffs.
+    candidates = _detect_relocations(candidates, diffs, job_id)
+
     # ── Step 2b: Opus diff pass — AI reads pages to find missed changes ──
     if effective_key:
         emit("orchestrator", 14, "Running AI diff pass (Opus)...")
@@ -287,6 +293,105 @@ def run_orchestrator(
         "old_structure_summary": _structure_summary(old_structure),
         "new_structure_summary": _structure_summary(new_structure),
     }
+
+
+def _detect_relocations(candidates: list[dict], diffs: list[dict], job_id: str) -> list[dict]:
+    """
+    Detect when low-similarity MODIFIED candidates are actually relocations.
+
+    When a document is massively restructured (e.g., 88→44 pages), section numbers
+    shift. "Table 2" in old might contain "Equipment specs" while "Table 2" in new
+    contains "Test matrix" — because old Table 2's content moved to Table 3 and
+    old Table 1's content moved into Table 2's slot.
+
+    This function cross-matches content previews to detect these patterns and
+    annotates candidates with relocation hints so mini-agents can classify correctly.
+    """
+    from difflib import SequenceMatcher
+
+    # Build lookup: section → diff item (for content matching)
+    diff_by_section = {}
+    for d in diffs:
+        sec = d.get("old_section") or d.get("new_section", "")
+        diff_by_section[sec.lower().strip()] = d
+
+    # Collect all old and new text previews for cross-matching
+    old_contents = {}  # section → old_text_preview
+    new_contents = {}  # section → new_text_preview
+    for c in candidates:
+        sec = c.get("section", "").lower().strip()
+        old_preview = c.get("old_text_preview", "")
+        new_preview = c.get("new_text_preview", "")
+        if old_preview:
+            old_contents[sec] = old_preview
+        if new_preview:
+            new_contents[sec] = new_preview
+
+    if not old_contents or not new_contents:
+        return candidates
+
+    relocation_count = 0
+    for cand in candidates:
+        # Only check MODIFIED candidates with low similarity (very different content)
+        if cand.get("category_hint") != "MODIFIED":
+            continue
+        sim = cand.get("similarity")
+        if sim is not None and sim > 0.4:
+            continue  # Similarity above 0.4 = probably a real modification, not relocation
+
+        cand_section = cand.get("section", "").lower().strip()
+        old_text = cand.get("old_text_preview", "")
+        new_text = cand.get("new_text_preview", "")
+
+        if not old_text or not new_text:
+            continue
+
+        # Check: does the OLD content of this section appear in a DIFFERENT section
+        # in the NEW document? (i.e., was the content relocated?)
+        old_relocated_to = None
+        best_old_match = 0.0
+        for other_sec, other_new_text in new_contents.items():
+            if other_sec == cand_section:
+                continue
+            ratio = SequenceMatcher(None,
+                                    old_text[:600].lower(),
+                                    other_new_text[:600].lower()).ratio()
+            if ratio > best_old_match and ratio > 0.5:
+                best_old_match = ratio
+                old_relocated_to = other_sec
+
+        # Check: does the NEW content of this section come from a DIFFERENT section
+        # in the OLD document? (i.e., was content moved into this slot?)
+        new_came_from = None
+        best_new_match = 0.0
+        for other_sec, other_old_text in old_contents.items():
+            if other_sec == cand_section:
+                continue
+            ratio = SequenceMatcher(None,
+                                    new_text[:600].lower(),
+                                    other_old_text[:600].lower()).ratio()
+            if ratio > best_new_match and ratio > 0.5:
+                best_new_match = ratio
+                new_came_from = other_sec
+
+        # If we found relocation evidence, annotate the candidate
+        if old_relocated_to or new_came_from:
+            hints = []
+            if old_relocated_to:
+                hints.append(f"old content (sim={best_old_match:.0%}) now at '{old_relocated_to}'")
+            if new_came_from:
+                hints.append(f"new content (sim={best_new_match:.0%}) came from '{new_came_from}'")
+
+            cand["relocation_hint"] = "; ".join(hints)
+            cand["category_hint"] = "STRUCTURAL"
+            cand["title"] = f"RELOCATED: {cand['section']} — {'; '.join(hints)}"
+            relocation_count += 1
+            print(f"[orchestrator {job_id}] Relocation detected: {cand['section']} — {'; '.join(hints)}")
+
+    if relocation_count:
+        print(f"[orchestrator {job_id}] Detected {relocation_count} relocations from content matching")
+
+    return candidates
 
 
 def _find_pages_for_section(section_ref: str, structure: dict) -> list[int]:

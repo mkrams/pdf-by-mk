@@ -64,19 +64,36 @@ For UNCERTAIN:
 {"decision": "UNCERTAIN", "reason": "what's missing or unclear", \
 "notes": "any partial observations that might help a follow-up pass"}
 
-CRITICAL — RENUMBERING DETECTION:
-If a section appears to be "added" or "removed", check the document structure listings. \
-If the SAME content exists in the OTHER version under a DIFFERENT section number, this is \
-a STRUCTURAL change (renumbering), NOT a NEW or REMOVED change. Use category "STRUCTURAL" \
-and describe it as a renumbering/relocation. For example, if "Section 5: Lot Requirements" \
-in the old doc became "Section 6: Lot Requirements" in the new doc because a new section \
-was inserted before it, that's STRUCTURAL — not REMOVED + NEW.
+CRITICAL — RENUMBERING AND RELOCATION DETECTION:
+Documents often undergo major restructuring where sections and tables are renumbered. \
+When this happens:
+
+1. ADD/REMOVE pattern: If a section appears "added" or "removed", check the document \
+structure listings. If the SAME content exists in the OTHER version under a DIFFERENT \
+section number, this is STRUCTURAL (renumbering), NOT NEW or REMOVED.
+
+2. **MODIFIED-but-actually-relocated pattern (VERY COMMON)**: When comparing the same \
+section NUMBER across old and new docs, the content may be COMPLETELY DIFFERENT — not \
+because the content was replaced, but because the section NUMBER now refers to different \
+content due to renumbering. For example:
+   - Old "Table 2" = "Measurement Equipment Specs"
+   - New "Table 2" = "Qualification Test Matrix"
+   This does NOT mean Table 2's content was replaced. It means old Table 2's content \
+   moved to Table 3 (or elsewhere), and what was previously Table 1 became Table 2.
+   → Use STRUCTURAL, describe it as relocation/renumbering.
+
+3. If the candidate has a "relocation_hint" field, the orchestrator has already detected \
+content matching across sections. Trust this hint and classify as STRUCTURAL.
+
+4. If similarity is very low (<0.3) for a MODIFIED candidate, suspect relocation rather \
+than content replacement. Check the structure listings to verify.
 
 Categories:
 - NEW: content in new but not old (truly new, not just renumbered)
-- MODIFIED: content changed between versions
+- MODIFIED: content at the same section was genuinely edited (similar text with specific changes)
 - REMOVED: content in old but not new (truly removed, not just renumbered)
-- STRUCTURAL: document structure changes (renumbering, reordering, relocation, layout)
+- STRUCTURAL: document structure changes (renumbering, reordering, relocation, layout). \
+Use this when content moved between section numbers due to restructuring.
 - FORMATTING: purely formatting changes (whitespace, line breaks, punctuation style) \
 with no substantive content difference. Still save these.
 """
@@ -95,6 +112,14 @@ You will receive:
 
 The programmatic diff flagged this section as changed. Your job is to find and \
 describe the change. It is almost certainly there — look carefully.
+
+IMPORTANT — RELOCATION vs REPLACEMENT:
+When a document is majorly restructured, sections and tables get renumbered. \
+If you see completely different content at the same section number, check whether \
+the old content moved to a different section number in the new document. If so, \
+this is STRUCTURAL (relocation/renumbering), NOT MODIFIED (content replacement). \
+If the candidate has a relocation_hint, the orchestrator already found evidence \
+of content relocation — trust it unless you see clear counter-evidence.
 
 You MUST respond with a JSON object (no markdown fences):
 
@@ -197,6 +222,20 @@ def run_mini_agent_pass1(
     )
     if candidate.get("manifest_item"):
         user_msg += f"**Manifest entry**: {candidate['manifest_item']}\n"
+    if candidate.get("relocation_hint"):
+        user_msg += (
+            f"\n**⚠️ RELOCATION DETECTED by orchestrator**: {candidate['relocation_hint']}\n"
+            f"The orchestrator's content matching found that this section's content was "
+            f"relocated, not replaced. Classify as STRUCTURAL (renumbering/relocation) "
+            f"unless you find strong evidence of actual content replacement.\n"
+        )
+    if candidate.get("similarity") is not None and candidate["similarity"] < 0.3:
+        user_msg += (
+            f"\n**Low similarity ({candidate['similarity']:.0%})**: The old and new content "
+            f"at this section number are very different. This is often caused by section "
+            f"renumbering in a major document restructure, NOT actual content replacement. "
+            f"Check the structure listings below to see if the content moved.\n"
+        )
 
     # Include document structure so agent can detect renumbering
     if old_structure_summary or new_structure_summary:
@@ -366,6 +405,12 @@ def run_mini_agent_pass2(
     )
     if candidate.get("manifest_item"):
         user_msg += f"**Manifest entry**: {candidate['manifest_item']}\n"
+    if candidate.get("relocation_hint"):
+        user_msg += (
+            f"\n**⚠️ RELOCATION DETECTED by orchestrator**: {candidate['relocation_hint']}\n"
+            f"Classify as STRUCTURAL (renumbering/relocation) unless you find strong "
+            f"evidence of actual content replacement.\n"
+        )
 
     user_msg += (
         f"\n### Previous Analyst Notes\n"
