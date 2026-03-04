@@ -12,13 +12,104 @@ from typing import Optional
 
 # ── TEXT EXTRACTION ──────────────────────────────────────────────────
 
+def _table_to_markdown(table: list) -> str:
+    """Convert a pdfplumber table (list of rows, each a list of cells) to markdown."""
+    if not table or not table[0]:
+        return ""
+    # Clean cells: replace None with empty string, strip whitespace
+    cleaned = []
+    for row in table:
+        cleaned.append([str(cell).strip() if cell else "" for cell in row])
+
+    # Build markdown table
+    lines = []
+    # Header row
+    lines.append("| " + " | ".join(cleaned[0]) + " |")
+    lines.append("| " + " | ".join(["---"] * len(cleaned[0])) + " |")
+    # Data rows
+    for row in cleaned[1:]:
+        # Pad row if it has fewer cells than header
+        while len(row) < len(cleaned[0]):
+            row.append("")
+        lines.append("| " + " | ".join(row[:len(cleaned[0])]) + " |")
+
+    return "\n".join(lines)
+
+
+def _extract_page_with_tables(page) -> str:
+    """Extract text from a pdfplumber page, preserving table structure as markdown.
+
+    Strategy: detect tables, get their bounding boxes, extract non-table text
+    separately, then stitch them together in reading order (top to bottom).
+    """
+    tables = page.find_tables()
+    if not tables:
+        # No tables on this page — just return plain text
+        return page.extract_text() or ""
+
+    # Collect table regions and their markdown representations
+    table_regions = []
+    for table in tables:
+        bbox = table.bbox  # (x0, y0, x1, y1)
+        extracted = table.extract()
+        if extracted:
+            md = _table_to_markdown(extracted)
+            if md:
+                table_regions.append({
+                    "y0": bbox[1],
+                    "y1": bbox[3],
+                    "bbox": bbox,
+                    "text": f"\n[TABLE]\n{md}\n[/TABLE]\n",
+                })
+
+    if not table_regions:
+        return page.extract_text() or ""
+
+    # Sort table regions by vertical position
+    table_regions.sort(key=lambda r: r["y0"])
+
+    # Extract text outside table regions
+    # We crop the page into strips between/around tables
+    page_height = page.height
+    page_width = page.width
+    parts = []
+    current_y = 0
+
+    for region in table_regions:
+        # Text above this table
+        if region["y0"] > current_y + 2:  # small tolerance
+            try:
+                crop = page.crop((0, current_y, page_width, region["y0"]))
+                text = crop.extract_text()
+                if text and text.strip():
+                    parts.append(text.strip())
+            except Exception:
+                pass
+
+        # The table itself as markdown
+        parts.append(region["text"])
+        current_y = region["y1"]
+
+    # Text after the last table
+    if current_y < page_height - 2:
+        try:
+            crop = page.crop((0, current_y, page_width, page_height))
+            text = crop.extract_text()
+            if text and text.strip():
+                parts.append(text.strip())
+        except Exception:
+            pass
+
+    return "\n".join(parts)
+
+
 def extract_full_text(pdf_path: str) -> dict:
     """Extract all text from a PDF with per-page structure."""
     pages = []
     full_text = ""
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages):
-            text = page.extract_text() or ""
+            text = _extract_page_with_tables(page)
             pages.append({"page": i + 1, "text": text, "char_count": len(text)})
             full_text += text + "\n"
     return {
@@ -30,12 +121,12 @@ def extract_full_text(pdf_path: str) -> dict:
 
 
 def extract_page_text(pdf_path: str, page_num: int) -> dict:
-    """Extract text from a single page."""
+    """Extract text from a single page, preserving table structure."""
     with pdfplumber.open(pdf_path) as pdf:
         if page_num < 1 or page_num > len(pdf.pages):
             return {"error": f"Page {page_num} out of range (1-{len(pdf.pages)})"}
         page = pdf.pages[page_num - 1]
-        text = page.extract_text() or ""
+        text = _extract_page_with_tables(page)
         return {"page": page_num, "text": text, "char_count": len(text)}
 
 
@@ -231,7 +322,7 @@ def _extract_section_texts(pdf_path: str) -> dict:
     Filters out false positives like bare numbers from table data rows.
     """
     with pdfplumber.open(pdf_path) as pdf:
-        full_text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+        full_text = "\n".join(_extract_page_with_tables(p) for p in pdf.pages)
 
     # Patterns for document structural elements (order matters — checked first to last)
     # Table/Figure/Appendix/Legend headers (must be at start of line, followed by title-like text or colon/dash)
