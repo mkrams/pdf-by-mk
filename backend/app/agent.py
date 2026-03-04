@@ -66,6 +66,58 @@ MAX_RETRIES = 3
 RETRY_BACKOFF = [5, 15, 30]  # seconds to wait between retries
 
 
+def _describe_tools(tool_names: list[str], blocks: list) -> str:
+    """Convert raw tool names into a natural-language progress message."""
+    from collections import Counter
+
+    counts = Counter(tool_names)
+    parts = []
+
+    for name, n in counts.items():
+        if name == "extract_pdf_text":
+            parts.append("Reading full document text" if n == 1 else "Reading both documents")
+        elif name == "extract_pdf_page":
+            if n == 1:
+                # Try to get page number from block input
+                for b in blocks:
+                    if b.name == "extract_pdf_page" and isinstance(b.input, dict):
+                        pg = b.input.get("page_number", "?")
+                        which = b.input.get("pdf_id", "")
+                        parts.append(f"Reading page {pg} of {which} document")
+                        break
+                else:
+                    parts.append("Reading a specific page")
+            else:
+                parts.append(f"Deep-reading {n} pages for details")
+        elif name == "detect_document_structure":
+            parts.append("Mapping document structure" if n == 1 else "Mapping both document structures")
+        elif name == "detect_revision_history":
+            parts.append("Scanning for revision history & change manifest")
+        elif name == "search_document":
+            # Get what we're searching for
+            queries = []
+            for b in blocks:
+                if b.name == "search_document" and isinstance(b.input, dict):
+                    q = b.input.get("query", "")
+                    if q:
+                        queries.append(q[:30])
+            if queries and len(queries) <= 2:
+                parts.append(f"Searching for: {', '.join(queries)}")
+            else:
+                parts.append(f"Running {n} verification searches")
+        elif name == "diff_sections":
+            parts.append("Comparing sections side-by-side")
+        elif name == "submit_changes":
+            parts.append("Compiling the final change register")
+        else:
+            parts.append(name)
+
+    if not parts:
+        return "Processing..."
+
+    return " · ".join(parts)
+
+
 def _call_claude_with_retry(client, model, system, tools, messages, max_tokens):
     """Call Claude API with retry on rate limits and transient errors."""
     last_error = None
@@ -228,11 +280,12 @@ def run_analysis(
 
         messages.append({"role": "user", "content": tool_results})
 
-        # Emit progress
+        # Emit progress with natural-language descriptions
         pct = min(80, int(turn_num / MAX_AGENT_TURNS * 80))
-        tools_str = ", ".join(t for t in tool_names if t != "report_progress")
-        if tools_str:
-            emit("working", pct, f"Called: {tools_str}", turn_num)
+        real_tools = [t for t in tool_names if t != "report_progress"]
+        if real_tools:
+            msg = _describe_tools(real_tools, tool_use_blocks)
+            emit("working", pct, msg, turn_num)
 
     # ── Post-process ──────────────────────────────────────────────
     emit("annotating", 88, "Generating annotated PDFs...", MAX_AGENT_TURNS)

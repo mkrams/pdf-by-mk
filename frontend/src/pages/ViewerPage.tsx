@@ -282,36 +282,13 @@ function ChangeDetail({
 // ── PDF Viewer (right panel) ─────────────────────────────────────
 
 function PdfViewer({
-  jobId, activeTab, page, onTabChange,
+  jobId, activeTab, onTabChange,
 }: {
   jobId: string;
   activeTab: 'old' | 'new';
-  page: number | null;
   onTabChange: (tab: 'old' | 'new') => void;
 }) {
-  const iframeRef = React.useRef<HTMLIFrameElement>(null);
   const baseUrl = getPdfUrl(jobId, activeTab);
-
-  // Navigate to page within already-loaded PDF (no reload)
-  useEffect(() => {
-    if (page && iframeRef.current) {
-      try {
-        // Try postMessage for PDF viewers that support it
-        iframeRef.current.contentWindow?.postMessage(
-          { type: 'page', page }, '*'
-        );
-        // Fallback: update the hash (works in most browser PDF viewers)
-        const currentSrc = iframeRef.current.src || '';
-        const hashlessUrl = currentSrc.split('#')[0];
-        const newUrl = `${hashlessUrl}#page=${page}`;
-        if (iframeRef.current.src !== newUrl) {
-          iframeRef.current.src = newUrl;
-        }
-      } catch {
-        // Cross-origin — can't access contentWindow
-      }
-    }
-  }, [page]);
 
   return (
     <div className="w-[420px] min-w-[300px] flex flex-col border-l border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900">
@@ -324,9 +301,8 @@ function PdfViewer({
           </button>
         ))}
       </div>
-      {/* key={baseUrl} — only reloads when switching old/new tab, NOT on page change */}
-      <iframe ref={iframeRef} key={baseUrl} src={baseUrl + (page ? `#page=${page}` : '')}
-        className="flex-1 border-0 w-full" title="PDF Viewer" />
+      {/* PDF loads ONCE per tab — no reloads on change selection */}
+      <iframe key={activeTab} src={baseUrl} className="flex-1 border-0 w-full" title="PDF Viewer" />
     </div>
   );
 }
@@ -341,7 +317,6 @@ export default function ViewerPage() {
   const [catFilter, setCatFilter] = useState('');
   const [impFilter, setImpFilter] = useState('');
   const [pdfTab, setPdfTab] = useState<'old' | 'new'>('new');
-  const [pdfPage, setPdfPage] = useState<number | null>(null);
   const [dark, setDark] = useState(true);
 
   // Select first change when results arrive
@@ -370,9 +345,8 @@ export default function ViewerPage() {
     return () => document.removeEventListener('keydown', handler);
   }, [result, selectedId]);
 
-  const handleViewPdf = useCallback((which: 'old' | 'new', page: number | null) => {
+  const handleViewPdf = useCallback((which: 'old' | 'new', _page: number | null) => {
     setPdfTab(which);
-    setPdfPage(page);
   }, []);
 
   const selectedChange = result?.changes.find(c => c.id === selectedId) || null;
@@ -413,7 +387,7 @@ export default function ViewerPage() {
             impFilter={impFilter} onImpFilter={setImpFilter}
           />
           <ChangeDetail change={selectedChange} jobId={jobId} onViewPdf={handleViewPdf} />
-          <PdfViewer jobId={jobId} activeTab={pdfTab} page={pdfPage} onTabChange={setPdfTab} />
+          <PdfViewer jobId={jobId} activeTab={pdfTab} onTabChange={setPdfTab} />
         </div>
       ) : isComplete && error ? (
         /* Failed — show error in progress monitor */
