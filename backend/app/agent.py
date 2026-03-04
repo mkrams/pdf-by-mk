@@ -18,35 +18,51 @@ from .pdf_utils import annotate_pdf
 from .models import ChangeItem, ProgressEvent
 
 SYSTEM_PROMPT = """\
-You are a fast, efficient PDF document comparison analyst. Compare two document \
-versions and produce a verified change register.
+You are a thorough PDF document comparison analyst. Compare two document versions \
+and produce a COMPLETE verified change register. Missing changes is unacceptable.
 
-## SPEED RULES (CRITICAL)
+## CRITICAL RULE: MANIFEST COMPLETENESS
+If the document contains a revision history / change manifest listing what was \
+revised, added, or deleted — you MUST cover 100% of those items. Every single \
+section, table, appendix, and figure mentioned in the manifest MUST appear as a \
+change in your output. The manifest is your checklist. After building your change \
+list, cross-check it against the manifest and add any missing items.
+
+## Efficiency Rules
 - Call multiple tools in parallel whenever possible (e.g. extract both PDFs at once).
-- Do NOT extract full text of both documents — use detect_document_structure and \
-detect_revision_history first, then use targeted page reads and search.
-- Use diff_sections for systematic comparison instead of reading every page.
-- Limit verification searches to 2-3 key terms per NEW/REMOVED item — don't over-search.
-- Submit your changes as soon as you have them. Don't do unnecessary extra passes.
-- You have a MAXIMUM of 20 turns. Be efficient but thorough.
+- Use detect_document_structure and detect_revision_history first.
+- Use diff_sections for systematic comparison.
+- You have a MAXIMUM of 20 turns. Be thorough within this budget.
 - Report progress every 2-3 tool calls.
 
-## Process (be fast)
+## Process
 
-1. **Structure + Manifest** (parallel): Call detect_document_structure on both + \
-detect_revision_history on the new PDF — all in one turn.
+1. **Structure + Manifest** (parallel, turn 1): Call detect_document_structure on \
+both PDFs + detect_revision_history on BOTH PDFs — all in one turn.
 
-2. **Diff**: Run diff_sections to get all changes at once.
+2. **Diff**: Run diff_sections to get all section-level changes.
 
-3. **Read targeted pages**: Only read specific pages where diffs were found.
+3. **Read targeted pages**: Read pages where diffs were found AND pages containing \
+every item mentioned in the manifest. Pay special attention to Tables — read the \
+full pages for every table mentioned in the manifest.
 
-4. **Classify**: For each change — category (NEW/MODIFIED/REMOVED/STRUCTURAL), \
-title, description, old_text, new_text, impact level.
+4. **Classify each change**: category (NEW/MODIFIED/REMOVED/STRUCTURAL), \
+title, description, old_text, new_text, impact.
 
-5. **Quick verify**: For NEW items, one search in old doc. For REMOVED, one search \
-in new doc. Batch multiple searches in parallel.
+5. **Manifest cross-check** (CRITICAL): Before submitting, compare your change list \
+against the manifest. For every manifest item you haven't yet covered, read the \
+relevant pages and add the change. Do NOT skip this step.
 
-6. **Submit**: Call submit_changes immediately.
+6. **Submit**: Call submit_changes with ALL changes.
+
+## What Counts as a Change
+- Any text modification, no matter how small (wording, values, references)
+- Structural changes to tables (new rows, columns, reorganization)
+- New content added (sections, notes, figures, table entries)
+- Content removed or deleted
+- Changes to table structure, headers, or organization
+- Changes to appendices, figures, and legends
+- Reference updates (standards, document numbers)
 
 ## Impact Levels
 - CRITICAL: changes pass/fail criteria or core requirements
@@ -205,11 +221,14 @@ def run_analysis(
 
     # Build initial user message
     user_msg = (
-        f"Compare these two PDF documents and produce a complete change register.\n\n"
+        f"Compare these two PDF documents and produce a COMPLETE change register.\n\n"
         f"**Old version**: '{old_label}' — uploaded as 'old' PDF\n"
         f"**New version**: '{new_label}' — uploaded as 'new' PDF\n\n"
-        f"Be fast and efficient. Start by detecting structure and revision history "
-        f"in parallel. Then diff, classify, verify, and submit."
+        f"IMPORTANT: If the document contains a revision history or change manifest, "
+        f"you MUST capture every single item listed there. Missing manifest items is "
+        f"a critical failure. Start by detecting structure and revision history on "
+        f"both documents in parallel. Then diff, read all relevant pages (especially "
+        f"tables), classify, cross-check against manifest, and submit."
     )
 
     messages = [{"role": "user", "content": user_msg}]

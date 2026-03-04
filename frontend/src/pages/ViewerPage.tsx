@@ -263,8 +263,9 @@ function PdfPageViewer({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
-  const [loadedPages, setLoadedPages] = useState<Set<number>>(new Set());
   const [visibleRange, setVisibleRange] = useState<[number, number]>([1, 3]);
+  // Track the last selectedId that triggered a scroll, so tab switches don't re-scroll
+  const lastScrolledId = useRef<number | null>(null);
 
   // Get the page for the selected change
   const selectedChange = changes.find(c => c.id === selectedId);
@@ -285,28 +286,28 @@ function PdfPageViewer({
     return map;
   }, [changes, viewMode]);
 
-  // Scroll to target page when selection changes
+  // Scroll ONLY when user selects a different change (not on tab switch)
   useEffect(() => {
-    if (targetPage > 0) {
+    if (selectedId !== null && selectedId !== lastScrolledId.current && targetPage > 0) {
+      lastScrolledId.current = selectedId;
       const el = pageRefs.current.get(targetPage);
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
       setVisibleRange([Math.max(1, targetPage - 1), Math.min(totalPages, targetPage + 2)]);
     }
-  }, [targetPage, totalPages]);
+  }, [selectedId, targetPage, totalPages]);
 
-  // Respond to explicit navigation (clicking OLD/NEW text boxes)
+  // Respond to explicit navigation (clicking OLD/NEW text boxes in detail panel)
   useEffect(() => {
     if (navToPage && navToPage.page > 0) {
-      // Ensure pages are loaded first, then scroll after a tick
       setVisibleRange([Math.max(1, navToPage.page - 1), Math.min(totalPages, navToPage.page + 2)]);
       setTimeout(() => {
         const el = pageRefs.current.get(navToPage.page);
         if (el) {
           el.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
-      }, 100);
+      }, 150);
     }
   }, [navToPage, totalPages]);
 

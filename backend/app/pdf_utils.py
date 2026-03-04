@@ -163,7 +163,7 @@ def detect_revision_history(pdf_path: str, max_pages_to_scan: int = 8) -> dict:
         return {
             "detected": True,
             "pages": found_pages,
-            "raw_text": raw_text[:3000],
+            "raw_text": raw_text[:6000],
             "items": {
                 "revised": list(set(revised)),
                 "added": list(set(added)),
