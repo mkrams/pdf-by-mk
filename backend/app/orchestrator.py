@@ -196,7 +196,7 @@ def run_orchestrator(
             print(f"[orchestrator {job_id}] Claude validation failed (non-fatal): {e}")
 
     # Cap candidates to prevent OOM on Railway
-    MAX_CANDIDATES = 50
+    MAX_CANDIDATES = 100
     if len(candidates) > MAX_CANDIDATES:
         print(f"[orchestrator {job_id}] Capping candidates from {len(candidates)} to {MAX_CANDIDATES}")
         # Sort by similarity (lower = more different = more likely a real change)
