@@ -237,6 +237,30 @@ def run_mini_agent_pass1(
             f"Check the structure listings below to see if the content moved.\n"
         )
 
+    # Include structured table diff from Docling if available
+    table_diff = candidate.get("table_diff")
+    if table_diff and table_diff.get("has_changes"):
+        user_msg += "\n### Structured Table Diff (cell-level, from Docling)\n"
+        user_msg += f"**Summary**: {table_diff['summary']}\n"
+        col_changes = table_diff.get("column_changes", {})
+        if col_changes.get("added"):
+            user_msg += f"**Columns added**: {', '.join(col_changes['added'])}\n"
+        if col_changes.get("removed"):
+            user_msg += f"**Columns removed**: {', '.join(col_changes['removed'])}\n"
+        row_changes = table_diff.get("row_changes", [])
+        if row_changes:
+            user_msg += "**Cell changes**:\n"
+            for rc in row_changes[:10]:  # Cap to avoid huge prompts
+                if rc["type"] == "modified":
+                    for cell in rc.get("cells", [])[:5]:
+                        user_msg += f"  - Row '{rc['key']}', column '{cell['column']}': '{cell['old']}' → '{cell['new']}'\n"
+                elif rc["type"] == "added":
+                    user_msg += f"  - Row added: '{rc['key']}' = {rc.get('data', [])}\n"
+                elif rc["type"] == "removed":
+                    user_msg += f"  - Row removed: '{rc['key']}' = {rc.get('data', [])}\n"
+        user_msg += "\nUse this structured data to describe the change precisely. "
+        user_msg += "Report specific cell values that changed rather than generic descriptions.\n"
+
     # Include document structure so agent can detect renumbering
     if old_structure_summary or new_structure_summary:
         user_msg += (

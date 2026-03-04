@@ -22,6 +22,13 @@ from .pdf_utils import (
 )
 from .models import ProgressEvent
 
+# Docling-powered extraction (layout-aware, OCR, structured tables)
+try:
+    from .docling_extract import parse_pdf as docling_parse_pdf, diff_documents as docling_diff, match_tables
+    HAS_DOCLING = True
+except ImportError:
+    HAS_DOCLING = False
+
 
 def run_orchestrator(
     job_id: str,
@@ -65,8 +72,34 @@ def run_orchestrator(
     old_page_count = get_page_count(old_pdf_path)
     new_page_count = get_page_count(new_pdf_path)
 
+    # Use Docling for layout-aware extraction when available
+    docling_result = None
+    old_docling = None
+    new_docling = None
+    table_matches = []
+
+    if HAS_DOCLING:
+        try:
+            emit("orchestrator", 3, "Running Docling layout analysis (OCR + tables)...")
+            docling_result = docling_diff(old_pdf_path, new_pdf_path)
+            old_docling = docling_result["old_parsed"]
+            new_docling = docling_result["new_parsed"]
+            table_matches = docling_result.get("table_matches", [])
+            print(f"[orchestrator {job_id}] Docling: {docling_result['summary']}")
+        except Exception as e:
+            print(f"[orchestrator {job_id}] Docling failed (falling back to regex): {e}")
+            docling_result = None
+
+    # Always run regex-based detection too (Docling supplements, doesn't fully replace)
     old_structure = detect_sections(old_pdf_path)
     new_structure = detect_sections(new_pdf_path)
+
+    # Merge Docling sections into structure if available
+    if old_docling:
+        _merge_docling_sections(old_structure, old_docling)
+    if new_docling:
+        _merge_docling_sections(new_structure, new_docling)
+
     print(f"[orchestrator {job_id}] Structure: old={old_structure['count']} sections ({old_page_count} pages), "
           f"new={new_structure['count']} sections ({new_page_count} pages)")
 
@@ -132,7 +165,164 @@ def run_orchestrator(
     if skipped_high_sim:
         print(f"[orchestrator {job_id}] Skipped {skipped_high_sim} near-identical sections (>95% similar)")
 
-    # ── Step 2a: Detect relocations (content at same number but different) ─
+    # ── Step 2a: Add table-level candidates from Docling ─────────────
+    if table_matches:
+        table_candidates_added = 0
+        covered_sections = {_normalize_section_ref(c["section"]) for c in candidates}
+        for tm in table_matches:
+            old_t = tm.get("old")
+            new_t = tm.get("new")
+            diff_info = tm.get("diff")
+
+            # Determine table label and type
+            if old_t and new_t:
+                # Matched table pair — check for changes
+                if not diff_info or not diff_info.get("has_changes"):
+                    continue  # No changes in this table pair
+
+                old_label = old_t["label"]
+                new_label = new_t["label"]
+                section_ref = new_label  # Use new label as section ref
+
+                # Check if renumbered (different labels, same content structure)
+                is_renumbered = old_label.lower() != new_label.lower()
+
+                norm = _normalize_section_ref(section_ref)
+                if norm in covered_sections:
+                    continue
+
+                # Build rich diff preview from cell-level changes
+                diff_preview_parts = [diff_info["summary"]]
+                for rc in diff_info.get("row_changes", [])[:5]:
+                    if rc["type"] == "modified":
+                        for cell in rc["cells"][:3]:
+                            diff_preview_parts.append(
+                                f"  {rc['key']}.{cell['column']}: {cell['old']} → {cell['new']}"
+                            )
+                    elif rc["type"] == "added":
+                        diff_preview_parts.append(f"  + row: {rc['key']}")
+                    elif rc["type"] == "removed":
+                        diff_preview_parts.append(f"  - row: {rc['key']}")
+
+                cat_hint = "STRUCTURAL" if is_renumbered else "MODIFIED"
+                title = (
+                    f"Table renumbered: {old_label} → {new_label}" if is_renumbered
+                    else f"Table modified: {new_label}"
+                )
+
+                candidates.append({
+                    "id": f"C{len(candidates)+1:03d}",
+                    "section": section_ref,
+                    "title": title,
+                    "category_hint": cat_hint,
+                    "old_pages": [old_t["page"]] if old_t.get("page") else [],
+                    "new_pages": [new_t["page"]] if new_t.get("page") else [],
+                    "diff_preview": "\n".join(diff_preview_parts),
+                    "old_text_preview": old_t.get("markdown", "")[:800],
+                    "new_text_preview": new_t.get("markdown", "")[:800],
+                    "manifest_item": None,
+                    "similarity": tm.get("similarity", 0.5),
+                    "table_diff": diff_info,  # Rich structured diff for mini-agents
+                    "relocation_hint": (
+                        f"Table renumbered: '{old_label}' → '{new_label}' "
+                        f"(matched by content, sim={tm['similarity']:.0%})"
+                    ) if is_renumbered else None,
+                })
+                covered_sections.add(norm)
+                table_candidates_added += 1
+
+            elif old_t and not new_t:
+                # Table removed
+                section_ref = old_t["label"]
+                norm = _normalize_section_ref(section_ref)
+                if norm not in covered_sections:
+                    candidates.append({
+                        "id": f"C{len(candidates)+1:03d}",
+                        "section": section_ref,
+                        "title": f"Table removed: {section_ref}",
+                        "category_hint": "REMOVED",
+                        "old_pages": [old_t["page"]] if old_t.get("page") else [],
+                        "new_pages": [],
+                        "diff_preview": f"Table '{section_ref}' not found in new document",
+                        "old_text_preview": old_t.get("markdown", "")[:800],
+                        "new_text_preview": "",
+                        "manifest_item": None,
+                        "similarity": 0.0,
+                    })
+                    covered_sections.add(norm)
+                    table_candidates_added += 1
+
+            elif new_t and not old_t:
+                # Table added
+                section_ref = new_t["label"]
+                norm = _normalize_section_ref(section_ref)
+                if norm not in covered_sections:
+                    candidates.append({
+                        "id": f"C{len(candidates)+1:03d}",
+                        "section": section_ref,
+                        "title": f"New table: {section_ref}",
+                        "category_hint": "NEW",
+                        "old_pages": [],
+                        "new_pages": [new_t["page"]] if new_t.get("page") else [],
+                        "diff_preview": f"New table '{section_ref}' added",
+                        "old_text_preview": "",
+                        "new_text_preview": new_t.get("markdown", "")[:800],
+                        "manifest_item": None,
+                        "similarity": 0.0,
+                    })
+                    covered_sections.add(norm)
+                    table_candidates_added += 1
+
+        if table_candidates_added:
+            print(f"[orchestrator {job_id}] Added {table_candidates_added} table-level candidates from Docling")
+
+        # Also enrich existing regex-based candidates with table diff data
+        # Use a smarter match: candidate "Table X" gets the table match where
+        # old_label or new_label matches "Table X" specifically
+        enriched = 0
+        used_matches = set()
+        for cand in candidates:
+            if cand.get("table_diff"):
+                continue  # Already has Docling data
+            cand_norm = _normalize_section_ref(cand["section"])
+            best_tm = None
+            best_tm_idx = None
+            for ti, tm in enumerate(table_matches):
+                if ti in used_matches:
+                    continue
+                old_t = tm.get("old")
+                new_t = tm.get("new")
+                diff_info = tm.get("diff")
+                if not diff_info or not diff_info.get("has_changes"):
+                    continue
+                # Prefer exact label match on old side (since regex diff uses old section names)
+                if old_t and _normalize_section_ref(old_t["label"]) == cand_norm:
+                    best_tm = tm
+                    best_tm_idx = ti
+                    break
+                elif new_t and _normalize_section_ref(new_t["label"]) == cand_norm:
+                    best_tm = tm
+                    best_tm_idx = ti
+                    # Don't break — prefer old-side match
+
+            if best_tm and best_tm_idx is not None:
+                used_matches.add(best_tm_idx)
+                old_t = best_tm.get("old")
+                new_t = best_tm.get("new")
+                cand["table_diff"] = best_tm["diff"]
+                # If tables were renumbered, add relocation hint
+                if old_t and new_t and old_t["label"].lower() != new_t["label"].lower():
+                    if not cand.get("relocation_hint"):
+                        cand["relocation_hint"] = (
+                            f"Table renumbered: '{old_t['label']}' → '{new_t['label']}' "
+                            f"(matched by content, sim={best_tm['similarity']:.0%})"
+                        )
+                        cand["category_hint"] = "STRUCTURAL"
+                enriched += 1
+        if enriched:
+            print(f"[orchestrator {job_id}] Enriched {enriched} existing candidates with Docling table diffs")
+
+    # ── Step 2b: Detect relocations (content at same number but different) ─
     # When a document is majorly restructured, "Table 2" old might have completely
     # different content than "Table 2" new because everything shifted. Detect this
     # by cross-matching low-similarity MODIFIED diffs against all other diffs.
@@ -259,7 +449,18 @@ def run_orchestrator(
         for p in cand.get("new_pages", []):
             pages_to_extract.add(("new", p))
 
+    # First, populate from Docling if available (layout-aware, OCR-capable)
+    if old_docling and old_docling.get("pages"):
+        for page_no, text in old_docling["pages"].items():
+            page_cache[("old", page_no)] = text
+    if new_docling and new_docling.get("pages"):
+        for page_no, text in new_docling["pages"].items():
+            page_cache[("new", page_no)] = text
+
+    # Fill remaining pages from pdfplumber (fallback for pages Docling didn't cover)
     for pdf_id, page_num in pages_to_extract:
+        if (pdf_id, page_num) in page_cache:
+            continue  # Already have from Docling
         pdf_path = old_pdf_path if pdf_id == "old" else new_pdf_path
         try:
             result = extract_page_text(pdf_path, page_num)
@@ -277,12 +478,18 @@ def run_orchestrator(
           f"Tokens={tokens_used}")
 
     # Build compact structure summaries for mini-agents
-    def _structure_summary(struct):
+    def _structure_summary(struct, docling_parsed=None):
         sections = struct.get("sections", [])
         lines = []
         for s in sections[:80]:  # cap to avoid bloating prompts
             title = s.get("title", "")
             lines.append(f"  {s['number']}: {title} (p{s['page']})" if title else f"  {s['number']} (p{s['page']})")
+        # Add table listing from Docling if available
+        if docling_parsed and docling_parsed.get("tables"):
+            lines.append("\n  Tables:")
+            for t in docling_parsed["tables"]:
+                cols = ", ".join(str(c) for c in t.get("columns", []))
+                lines.append(f"    {t['label']} (p{t['page']}): columns=[{cols}], {len(t.get('rows', []))} rows")
         return "\n".join(lines) if lines else "(no sections detected)"
 
     return {
@@ -290,9 +497,46 @@ def run_orchestrator(
         "manifest": manifest if manifest.get("detected") else None,
         "page_cache": page_cache,
         "tokens_used": tokens_used,
-        "old_structure_summary": _structure_summary(old_structure),
-        "new_structure_summary": _structure_summary(new_structure),
+        "old_structure_summary": _structure_summary(old_structure, old_docling),
+        "new_structure_summary": _structure_summary(new_structure, new_docling),
     }
+
+
+def _merge_docling_sections(structure: dict, docling_parsed: dict):
+    """Merge Docling-detected sections into the regex-based structure dict.
+    Only adds sections not already present (by normalized number)."""
+    existing = set()
+    for s in structure.get("sections", []):
+        existing.add(s["number"].lower().strip())
+        # Also add with title for "Table X: Title" style entries
+        full = f"{s['number']}: {s.get('title', '')}".lower().strip().rstrip(":")
+        existing.add(full)
+
+    for ds in docling_parsed.get("sections", []):
+        num = ds["number"].lower().strip()
+        if num not in existing:
+            structure["sections"].append({
+                "number": ds["number"],
+                "title": ds["title"],
+                "page": ds["page"],
+            })
+            existing.add(num)
+
+    # Also add table entries as sections for structure matching
+    for dt in docling_parsed.get("tables", []):
+        label = dt["label"]
+        num = label.lower().strip()
+        if num not in existing:
+            structure["sections"].append({
+                "number": label,
+                "title": "",
+                "page": dt["page"],
+            })
+            existing.add(num)
+
+    structure["count"] = len(structure["sections"])
+    # Sort by page then number
+    structure["sections"].sort(key=lambda s: (s["page"], s["number"]))
 
 
 def _detect_relocations(candidates: list[dict], diffs: list[dict], job_id: str) -> list[dict]:
