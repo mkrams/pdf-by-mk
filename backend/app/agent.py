@@ -129,6 +129,7 @@ def _call_claude_with_retry(client, model, system, tools, messages, max_tokens):
                 system=system,
                 tools=tools,
                 messages=messages,
+                temperature=0,  # Deterministic: same docs → same results
             )
         except anthropic.RateLimitError as e:
             last_error = e
@@ -187,14 +188,15 @@ def run_analysis(
 
     def emit(stage, percent, message, turn=0):
         if progress_callback:
-            elapsed = int(time.time() - start_time)
-            mins, secs = divmod(elapsed, 60)
-            detail = (
-                f"[{mins}:{secs:02d}] Turn {turn}/{MAX_AGENT_TURNS} | "
-                f"{total_input_tokens + total_output_tokens:,} tokens | {message}"
-            )
+            elapsed_secs = int(time.time() - start_time)
             progress_callback(ProgressEvent(
-                stage=stage, percent=percent, message=detail,
+                stage=stage,
+                percent=percent,
+                message=message,
+                turn=turn,
+                max_turns=MAX_AGENT_TURNS,
+                tokens=total_input_tokens + total_output_tokens,
+                elapsed=elapsed_secs,
                 timestamp=datetime.utcnow().isoformat(),
             ))
 

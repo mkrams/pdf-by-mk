@@ -342,22 +342,32 @@ def annotate_pdf(pdf_path: str, output_path: str, annotations: list) -> dict:
         found = False
         for page_num in range(len(doc)):
             page = doc[page_num]
-            rects = page.search_for(search_text, quads=False)
+            try:
+                rects = page.search_for(search_text, quads=False)
+            except Exception:
+                continue
             if rects:
-                # Layer 1: Paragraph background (light yellow rect)
-                para_rect = _expand_to_paragraph(page, rects)
-                if para_rect:
-                    rect_annot = page.add_rect_annot(para_rect)
-                    rect_annot.set_colors(stroke=(0.9, 0.85, 0.5), fill=(1.0, 1.0, 0.8))
-                    rect_annot.set_opacity(0.25)
-                    rect_annot.set_border(width=0.5)
-                    rect_annot.update()
+                try:
+                    # Layer 1: Paragraph background (light yellow rect)
+                    para_rect = _expand_to_paragraph(page, rects)
+                    if para_rect:
+                        rect_annot = page.add_rect_annot(para_rect)
+                        rect_annot.set_colors(stroke=(0.9, 0.85, 0.5), fill=(1.0, 1.0, 0.8))
+                        rect_annot.set_opacity(0.25)
+                        rect_annot.set_border(width=0.5)
+                        rect_annot.update()
 
-                # Layer 2: Specific text highlight (orange)
-                highlight = page.add_highlight_annot(rects)
-                highlight.set_colors(stroke=(1.0, 0.6, 0.0))
-                highlight.set_opacity(0.45)
-                highlight.update()
+                    # Layer 2: Specific text highlight (orange)
+                    # Filter out invalid rects before highlighting
+                    valid_rects = [r for r in rects if not r.is_infinite and not r.is_empty and r.width > 0 and r.height > 0]
+                    if valid_rects:
+                        highlight = page.add_highlight_annot(valid_rects)
+                        highlight.set_colors(stroke=(1.0, 0.6, 0.0))
+                        highlight.set_opacity(0.45)
+                        highlight.update()
+                except (ValueError, RuntimeError) as e:
+                    # Skip this annotation if rect is invalid — don't crash the whole job
+                    print(f"[annotate] Skipping change #{change_id} on page {page_num+1}: {e}")
 
                 highlight_count += 1
                 page_map[change_id] = page_num + 1
@@ -369,12 +379,20 @@ def annotate_pdf(pdf_path: str, output_path: str, annotations: list) -> dict:
             shorter = search_text[:30]
             for page_num in range(len(doc)):
                 page = doc[page_num]
-                rects = page.search_for(shorter, quads=False)
+                try:
+                    rects = page.search_for(shorter, quads=False)
+                except Exception:
+                    continue
                 if rects:
-                    highlight = page.add_highlight_annot(rects)
-                    highlight.set_colors(stroke=(1.0, 0.6, 0.0))
-                    highlight.set_opacity(0.35)
-                    highlight.update()
+                    try:
+                        valid_rects = [r for r in rects if not r.is_infinite and not r.is_empty and r.width > 0 and r.height > 0]
+                        if valid_rects:
+                            highlight = page.add_highlight_annot(valid_rects)
+                            highlight.set_colors(stroke=(1.0, 0.6, 0.0))
+                            highlight.set_opacity(0.35)
+                            highlight.update()
+                    except (ValueError, RuntimeError) as e:
+                        print(f"[annotate] Skipping fallback change #{change_id} on page {page_num+1}: {e}")
                     highlight_count += 1
                     page_map[change_id] = page_num + 1
                     break
@@ -389,10 +407,29 @@ def _expand_to_paragraph(page, rects):
     """Expand highlight rects to cover the full surrounding paragraph."""
     if not rects:
         return None
-    x0 = min(r.x0 for r in rects)
-    y0 = min(r.y0 for r in rects)
-    x1 = max(r.x1 for r in rects)
-    y1 = max(r.y1 for r in rects)
+
+    # Filter out any invalid rects
+    valid_rects = []
+    for r in rects:
+        try:
+            if r.is_infinite or r.is_empty:
+                continue
+            if r.width > 0 and r.height > 0:
+                valid_rects.append(r)
+        except Exception:
+            continue
+
+    if not valid_rects:
+        return None
+
+    x0 = min(r.x0 for r in valid_rects)
+    y0 = min(r.y0 for r in valid_rects)
+    x1 = max(r.x1 for r in valid_rects)
+    y1 = max(r.y1 for r in valid_rects)
+
+    # Sanity check the bounding box
+    if x0 >= x1 or y0 >= y1:
+        return None
 
     blocks = page.get_text("blocks")
     para_rect = fitz.Rect(x0, y0, x1, y1)
@@ -402,12 +439,30 @@ def _expand_to_paragraph(page, rects):
         block_type = block[6] if len(block) > 6 else 0
         if block_type != 0:
             continue
-        block_rect = fitz.Rect(bx0, by0, bx1, by1)
-        if block_rect.intersects(para_rect):
-            para_rect = para_rect | block_rect
+        try:
+            block_rect = fitz.Rect(bx0, by0, bx1, by1)
+            if block_rect.is_infinite or block_rect.is_empty:
+                continue
+            if block_rect.width <= 0 or block_rect.height <= 0:
+                continue
+            if block_rect.intersects(para_rect):
+                para_rect = para_rect | block_rect
+        except Exception:
+            continue
 
+    # Clamp to page bounds with padding
     para_rect.x0 = max(0, para_rect.x0 - 3)
     para_rect.y0 = max(0, para_rect.y0 - 2)
     para_rect.x1 = min(page.rect.width, para_rect.x1 + 3)
     para_rect.y1 = min(page.rect.height, para_rect.y1 + 2)
+
+    # Final validation — must be a valid, finite, non-empty rect
+    try:
+        if para_rect.is_infinite or para_rect.is_empty:
+            return None
+        if para_rect.width <= 0 or para_rect.height <= 0:
+            return None
+    except Exception:
+        return None
+
     return para_rect

@@ -47,6 +47,10 @@ class AnalysisResult(BaseModel):
 class ProgressEvent(BaseModel):
     stage: str
     percent: int = 0
-    message: str = ""
+    message: str = ""       # Human-readable message (e.g., "Mapping document structures")
+    turn: int = 0           # Current AI turn
+    max_turns: int = 15     # Max AI turns
+    tokens: int = 0         # Total tokens used
+    elapsed: int = 0        # Seconds elapsed
     changes_found: int = 0
     timestamp: str = ""

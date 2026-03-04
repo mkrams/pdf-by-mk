@@ -39,5 +39,9 @@ export interface ProgressEvent {
   stage: string;
   percent: number;
   message: string;
+  turn?: number;
+  max_turns?: number;
+  tokens?: number;
+  elapsed?: number;
   timestamp?: string;
 }

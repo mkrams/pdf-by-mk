@@ -28,112 +28,10 @@ function Badge({ text, colors }: { text: string; colors: string }) {
   return <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${colors}`}>{text}</span>;
 }
 
-// ── Miami Vice Sun Animation ────────────────────────────────────
-
-function MiamiSun({ percent }: { percent: number }) {
-  // Sun travels across the sky: 0% = left horizon (sunrise), 50% = top (noon), 100% = right horizon (sunset)
-  // Map percent to a position on an arc
-  const t = percent / 100;
-  // x goes from 10% to 90%
-  const x = 10 + t * 80;
-  // y follows a parabola: highest at t=0.5
-  const y = 85 - (1 - 4 * (t - 0.5) * (t - 0.5)) * 70;
-
-  // Sky color transitions: night → dawn → day → dusk → night
-  const skyColors = t < 0.15
-    ? 'rgba(10,0,26,1)' // night
-    : t < 0.3
-    ? `rgba(${Math.round(26 + (t - 0.15) / 0.15 * 20)},${Math.round(5 + (t - 0.15) / 0.15 * 10)},${Math.round(51 + (t - 0.15) / 0.15 * 30)},1)` // dawn
-    : t < 0.7
-    ? 'rgba(45,15,80,1)' // day (still purple-ish, Miami Vice style)
-    : t < 0.85
-    ? `rgba(${Math.round(45 - (t - 0.7) / 0.15 * 20)},${Math.round(15 - (t - 0.7) / 0.15 * 10)},${Math.round(80 - (t - 0.7) / 0.15 * 30)},1)` // dusk
-    : 'rgba(10,0,26,1)'; // night again
-
-  // Sun glow intensity
-  const glowIntensity = t < 0.1 ? t / 0.1 : t > 0.9 ? (1 - t) / 0.1 : 1;
-
-  return (
-    <svg viewBox="0 0 100 100" className="absolute inset-0 w-full h-full" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id="sunGradAnim" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#ff2d95" />
-          <stop offset="100%" stopColor="#ffb347" />
-        </linearGradient>
-        <radialGradient id="sunGlow" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="rgba(255,45,149,0.4)" />
-          <stop offset="100%" stopColor="rgba(255,45,149,0)" />
-        </radialGradient>
-      </defs>
-      {/* Sky background */}
-      <rect width="100" height="100" fill={skyColors} />
-      {/* Stars (visible at low percent) */}
-      {(t < 0.2 || t > 0.8) && (
-        <g opacity={t < 0.2 ? 1 - t / 0.2 : (t - 0.8) / 0.2}>
-          {[
-            [15, 20], [30, 12], [50, 8], [70, 15], [85, 22],
-            [20, 35], [40, 28], [60, 18], [80, 30], [45, 40],
-            [10, 45], [90, 38], [25, 50], [75, 45],
-          ].map(([sx, sy], i) => (
-            <circle key={i} cx={sx} cy={sy} r={0.3 + (i % 3) * 0.2} fill="white" opacity={0.5 + (i % 3) * 0.2} />
-          ))}
-        </g>
-      )}
-      {/* Sun glow */}
-      <circle cx={x} cy={y} r={12} fill="url(#sunGlow)" opacity={glowIntensity * 0.6} />
-      {/* Sun */}
-      <circle cx={x} cy={y} r={5} fill="url(#sunGradAnim)" opacity={glowIntensity} />
-      {/* Horizontal lines through sun */}
-      {[0, 1.5, 2.7, 3.6, 4.3, 4.8].map((offset, i) => (
-        <rect key={i} x={x - 5} y={y + offset - 2.5} width={10} height={0.5}
-          fill="rgba(20,0,40,0.5)" opacity={glowIntensity} />
-      ))}
-      {/* Water / horizon */}
-      <rect x="0" y="85" width="100" height="15" fill="rgba(0,0,20,0.8)" />
-      {/* Water reflection */}
-      <ellipse cx={x} cy="88" rx={6 * glowIntensity} ry={2} fill="rgba(255,45,149,0.15)" opacity={glowIntensity} />
-      {/* Buildings silhouette */}
-      <g fill="rgba(10,0,26,0.95)">
-        <rect x="5" y="70" width="6" height="15" />
-        <rect x="12" y="62" width="8" height="23" />
-        <rect x="21" y="72" width="5" height="13" />
-        <rect x="27" y="55" width="7" height="30" />
-        <rect x="35" y="65" width="5.5" height="20" />
-        <rect x="42" y="58" width="9" height="27" />
-        <rect x="52" y="48" width="8" height="37" />
-        <rect x="61" y="60" width="7" height="25" />
-        <rect x="69" y="68" width="6" height="17" />
-        <rect x="76" y="55" width="8.5" height="30" />
-        <rect x="85" y="65" width="5" height="20" />
-        <rect x="91" y="70" width="7" height="15" />
-      </g>
-      {/* Palm tree silhouettes */}
-      <g fill="rgba(5,0,15,0.9)">
-        <rect x="17" y="64" width="1" height="21" rx="0.5" />
-        <ellipse cx="14" cy="63" rx="5" ry="1.2" transform="rotate(-20 14 63)" />
-        <ellipse cx="20" cy="62" rx="4.5" ry="1" transform="rotate(15 20 62)" />
-        <rect x="82" y="66" width="1" height="19" rx="0.5" />
-        <ellipse cx="79" cy="65" rx="4.5" ry="1.1" transform="rotate(-18 79 65)" />
-        <ellipse cx="85" cy="64.5" rx="4" ry="1" transform="rotate(20 85 64.5)" />
-      </g>
-      {/* Retro grid on water */}
-      <g stroke="rgba(0,229,255,0.08)" strokeWidth="0.2" fill="none">
-        {[88, 91, 94, 97].map(gy => (
-          <line key={gy} x1="0" y1={gy} x2="100" y2={gy} />
-        ))}
-        {[10, 20, 30, 40, 50, 60, 70, 80, 90].map(gx => (
-          <line key={gx} x1={gx} y1="85" x2={gx < 50 ? gx - 10 : gx + 10} y2="100" />
-        ))}
-      </g>
-    </svg>
-  );
-}
-
-// ── Progress Monitor (Miami Vice style) ─────────────────────────
+// ── Progress Monitor (Miami Vice style, static background) ──────
 
 function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: string | null }) {
   const latest = events[events.length - 1];
-  const pct = latest?.percent || 0;
   const [elapsed, setElapsed] = useState(0);
   const logRef = React.useRef<HTMLDivElement>(null);
 
@@ -146,20 +44,54 @@ function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: s
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [events]);
 
-  const mins = Math.floor(elapsed / 60);
-  const secs = elapsed % 60;
-  const turnMatch = latest?.message?.match(/Turn (\d+)\/(\d+)/);
-  const tokenMatch = latest?.message?.match(/([\d,]+) tokens/);
-  const currentTurn = turnMatch ? parseInt(turnMatch[1]) : 0;
-  const maxTurns = turnMatch ? parseInt(turnMatch[2]) : 15;
-  const tokens = tokenMatch ? tokenMatch[1] : '0';
+  // Use structured fields from the event, with local timer as fallback
+  const elapsedSecs = latest?.elapsed || elapsed;
+  const mins = Math.floor(elapsedSecs / 60);
+  const secs = elapsedSecs % 60;
+  const currentTurn = latest?.turn || 0;
+  const maxTurns = latest?.max_turns || 15;
+  const tokens = latest?.tokens || 0;
+  const tokensStr = tokens > 0 ? tokens.toLocaleString() : '0';
+
+  // Progress bar: based on elapsed time (typical analysis is 3-5 min)
+  // Smoothly fills to ~90% over 5 min, never reaches 100% until done
+  const timePct = Math.min(90, Math.round((elapsedSecs / 300) * 90));
+  const pct = latest?.stage === 'complete' ? 100 : Math.max(timePct, latest?.percent || 0);
 
   return (
     <div className="flex-1 flex flex-col relative overflow-hidden"
-      style={{ background: 'linear-gradient(180deg, #0a001a 0%, #1a0533 50%, #0a001a 100%)' }}>
+      style={{ background: 'linear-gradient(180deg, #0a001a 0%, #1a0533 40%, #2d0a4e 70%, #1a0a3e 100%)' }}>
 
-      {/* Animated sun background */}
-      <MiamiSun percent={pct} />
+      {/* Static Miami Vice skyline background */}
+      <svg viewBox="0 0 1200 400" className="absolute bottom-0 left-0 w-full" preserveAspectRatio="xMidYMax slice" style={{ opacity: 0.25 }}>
+        <defs>
+          <linearGradient id="sunGradP" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#ff2d95" />
+            <stop offset="100%" stopColor="#ffb347" />
+          </linearGradient>
+        </defs>
+        <circle cx="600" cy="320" r="120" fill="url(#sunGradP)" opacity="0.5" />
+        {[240, 260, 275, 288, 298, 306, 312, 317].map((y, i) => (
+          <rect key={i} x="480" y={y} width="240" height="3" fill="rgba(20,0,40,0.5)" />
+        ))}
+        <g fill="#1a0a2e">
+          <rect x="50" y="180" width="60" height="220" />
+          <rect x="120" y="140" width="80" height="260" />
+          <rect x="210" y="200" width="50" height="200" />
+          <rect x="270" y="100" width="70" height="300" />
+          <rect x="350" y="160" width="55" height="240" />
+          <rect x="420" y="120" width="90" height="280" />
+          <rect x="560" y="60" width="80" height="340" />
+          <rect x="660" y="130" width="70" height="270" />
+          <rect x="740" y="170" width="60" height="230" />
+          <rect x="810" y="110" width="85" height="290" />
+          <rect x="905" y="190" width="55" height="210" />
+          <rect x="970" y="150" width="70" height="250" />
+          <rect x="1050" y="200" width="60" height="200" />
+          <rect x="1120" y="170" width="80" height="230" />
+        </g>
+        <rect x="0" y="390" width="1200" height="10" fill="#0d0520" />
+      </svg>
 
       {/* Content overlay */}
       <div className="relative z-10 flex-1 flex flex-col items-center justify-center p-8">
@@ -211,20 +143,20 @@ function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: s
                   <div className="text-2xl font-mono font-bold" style={{ color: '#00e5ff' }}>
                     {currentTurn}<span style={{ color: 'rgba(255,255,255,0.2)' }}>/{maxTurns}</span>
                   </div>
-                  <div className="text-[10px] text-white/30 uppercase tracking-wider">AI Turns</div>
+                  <div className="text-[10px] text-white/30 uppercase tracking-wider">AI Steps</div>
                 </div>
                 <div className="text-center">
                   <div className="text-2xl font-mono font-bold" style={{ color: '#ffb347' }}>
-                    {tokens}
+                    {tokensStr}
                   </div>
                   <div className="text-[10px] text-white/30 uppercase tracking-wider">Tokens</div>
                 </div>
               </div>
 
-              {/* Neon progress bar */}
+              {/* Neon progress bar — time-based, smooth */}
               <div className="w-full rounded-full h-2 mb-3"
                 style={{ background: 'rgba(255,255,255,0.05)' }}>
-                <div className="h-2 rounded-full transition-all duration-700 ease-out"
+                <div className="h-2 rounded-full transition-all duration-1000 ease-out"
                   style={{
                     width: `${Math.max(pct, 2)}%`,
                     background: 'linear-gradient(90deg, #ff2d95, #d926ff, #00e5ff)',
@@ -232,9 +164,9 @@ function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: s
                   }} />
               </div>
 
-              {/* Current action */}
+              {/* Current action — human readable */}
               <div className="text-center text-sm mb-6" style={{ color: 'rgba(255,255,255,0.5)' }}>
-                {latest?.message?.replace(/^\[[\d:]+\]\s*Turn \d+\/\d+\s*\|\s*[\d,]+ tokens\s*\|\s*/, '') || 'Connecting to the engine...'}
+                {latest?.message || 'Connecting to the engine...'}
               </div>
 
               {/* Activity log */}
@@ -244,13 +176,19 @@ function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: s
                   <div className="text-[11px] py-0.5 font-mono animate-pulse" style={{ color: 'rgba(0,229,255,0.5)' }}>
                     Warming up the AI engine...
                   </div>
-                ) : events.map((ev, i) => (
-                  <div key={i} className="text-[11px] py-0.5 font-mono flex gap-2">
-                    <span style={{ color: 'rgba(255,45,149,0.5)' }} className="min-w-[3ch] text-right">{ev.percent}%</span>
-                    <span style={{ color: 'rgba(255,255,255,0.1)' }}>|</span>
-                    <span style={{ color: 'rgba(255,255,255,0.4)' }}>{ev.message}</span>
-                  </div>
-                ))}
+                ) : events.map((ev, i) => {
+                  const evMins = Math.floor((ev.elapsed || 0) / 60);
+                  const evSecs = (ev.elapsed || 0) % 60;
+                  return (
+                    <div key={i} className="text-[11px] py-0.5 font-mono flex gap-2">
+                      <span style={{ color: 'rgba(255,45,149,0.5)' }} className="min-w-[4ch] text-right shrink-0">
+                        {evMins}:{evSecs.toString().padStart(2, '0')}
+                      </span>
+                      <span style={{ color: 'rgba(255,255,255,0.1)' }}>|</span>
+                      <span style={{ color: 'rgba(255,255,255,0.4)' }}>{ev.message}</span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
