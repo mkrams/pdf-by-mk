@@ -483,7 +483,7 @@ function PageImage({ jobId, which, pageNum }: { jobId: string; which: string; pa
 
 export default function ViewerPage() {
   const { jobId } = useParams<{ jobId: string }>();
-  const { progress, result, isComplete, error } = useAnalysis(jobId || null);
+  const { progress, streamingChanges, result, isComplete, error } = useAnalysis(jobId || null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
   const [catFilter, setCatFilter] = useState('');
@@ -492,8 +492,10 @@ export default function ViewerPage() {
   // Navigate-to-page trigger: bumped each time user clicks OLD/NEW text boxes
   const [navToPage, setNavToPage] = useState<{ page: number; ts: number } | null>(null);
 
-  const changes = result?.changes || [];
+  // Use final result changes when available, otherwise streaming changes during analysis
+  const changes = result?.changes?.length ? result.changes : streamingChanges;
   const totalPages = viewMode === 'old' ? (result?.old_pages || 0) : (result?.new_pages || 0);
+  const isAnalyzing = !isComplete && !error;
 
   // Handler: click OLD/NEW text box → switch doc + scroll to page
   const navigateToDocPage = useCallback((which: 'old' | 'new', page: number | undefined) => {
@@ -543,8 +545,8 @@ export default function ViewerPage() {
 
   if (!jobId) return <div className="p-8">No job ID</div>;
 
-  // Determine what to show
-  const hasResults = result && changes.length > 0;
+  // Determine what to show — show results panel if we have any changes (including streaming)
+  const hasResults = changes.length > 0;
 
   return (
     <div className={`h-screen flex flex-col ${dark ? 'dark' : ''}`}>
@@ -559,12 +561,19 @@ export default function ViewerPage() {
           }}>
           PDF by MK
         </h1>
-        {result && (
+        {changes.length > 0 && (
           <div className="flex gap-2 text-[10px]">
-            <span className="bg-white/15 px-2 py-0.5 rounded-full">{result.total_changes} changes</span>
-            {Object.entries(result.by_category || {}).map(([k, v]) => (
+            <span className="bg-white/15 px-2 py-0.5 rounded-full">
+              {changes.length} changes{isAnalyzing ? '...' : ''}
+            </span>
+            {result?.by_category && Object.entries(result.by_category).map(([k, v]) => (
               <span key={k} className="bg-white/10 px-2 py-0.5 rounded-full">{k}: {v}</span>
             ))}
+            {isAnalyzing && (
+              <span className="bg-cyan-500/20 text-cyan-300 px-2 py-0.5 rounded-full animate-pulse">
+                analyzing...
+              </span>
+            )}
           </div>
         )}
         <div className="ml-auto flex items-center gap-2 text-[10px]">
@@ -664,7 +673,7 @@ export default function ViewerPage() {
                       ? 'bg-white dark:bg-gray-900 border-b-2 border-blue-500 text-blue-600'
                       : 'bg-gray-100 dark:bg-gray-800 text-gray-500 hover:text-gray-700'
                     }`}>
-                  {tab === 'old' ? `Old (${result?.old_pages || '?'}p)` : `New (${result?.new_pages || '?'}p)`}
+                  {tab === 'old' ? `Old${result?.old_pages ? ` (${result.old_pages}p)` : ''}` : `New${result?.new_pages ? ` (${result.new_pages}p)` : ''}`}
                 </button>
               ))}
             </div>

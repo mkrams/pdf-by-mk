@@ -17,9 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 
 from .config import CORS_ORIGINS, UPLOAD_DIR, MAX_FILE_SIZE, JOB_EXPIRY_SECONDS
-from .agent import run_analysis
-from .models import ProgressEvent
-from .pdf_utils import render_page_image, get_page_count
+from .orchestrator import run_orchestrator
+from .mini_agent import run_mini_agent
+from .models import ProgressEvent, ChangeItem
+from .pdf_utils import render_page_image, get_page_count, annotate_pdf
 
 app = FastAPI(title="PDF by MK", version="1.0.0")
 
@@ -124,31 +125,211 @@ async def start_analysis_endpoint(
     }
 
 
+MINI_AGENT_BATCH_SIZE = 5  # How many mini-agents to run in parallel
+
+
 async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
-    """Run analysis in a worker thread so it doesn't block the event loop."""
+    """
+    Two-phase analysis pipeline:
+    Phase 1: Orchestrator identifies candidates (fast, mostly programmatic)
+    Phase 2: Mini-agents analyze each candidate (parallel, streamed)
+    Phase 3: Annotation (batch)
+    """
+    start_time = time.time()
+    all_changes = []  # Accumulated classified changes
+    total_tokens = 0
+    change_id_counter = [0]  # mutable for closure
 
     def progress_cb(event: ProgressEvent):
-        """SYNC callback — called from the worker thread."""
+        """SYNC callback — called from worker threads."""
         event_dict = event.model_dump()
         jobs[job_id]["progress"].append(event_dict)
         if job_id in progress_queues:
             progress_queues[job_id].put(event_dict)
 
+    def emit_change(change_dict):
+        """SYNC callback — called when a mini-agent classifies a change."""
+        change_id_counter[0] += 1
+        change_dict["id"] = change_id_counter[0]
+        all_changes.append(change_dict)
+
+        # Stream to frontend immediately
+        if job_id in progress_queues:
+            progress_queues[job_id].put({
+                "event_type": "change_found",
+                "change": change_dict,
+            })
+
     try:
-        # run_analysis is SYNC (blocking) — run it in a thread
-        result = await asyncio.to_thread(
-            run_analysis,
+        # ── PHASE 1: ORCHESTRATOR ──────────────────────────────────────
+        jobs[job_id]["phase"] = "orchestrator"
+        print(f"[job {job_id}] Phase 1: Orchestrator starting...")
+
+        orch_result = await asyncio.to_thread(
+            run_orchestrator,
             job_id, old_path, new_path, old_label, new_label, api_key, progress_cb,
         )
+
+        candidates = orch_result.get("candidates", [])
+        manifest_data = orch_result.get("manifest")
+        page_cache = orch_result.get("page_cache", {})
+        total_tokens += orch_result.get("tokens_used", 0)
+
+        print(f"[job {job_id}] Phase 1 complete: {len(candidates)} candidates, "
+              f"{len(page_cache)} pages cached")
+
+        if not candidates:
+            # No changes found — still complete successfully
+            progress_cb(ProgressEvent(
+                stage="complete", percent=100,
+                message="No changes detected between documents",
+                changes_found=0,
+            ))
+            jobs[job_id]["status"] = "completed"
+            jobs[job_id]["result"] = _build_empty_result(old_path, new_path)
+            if job_id in progress_queues:
+                progress_queues[job_id].put({
+                    "stage": "complete", "percent": 100,
+                    "message": "No changes detected",
+                })
+            return
+
+        # ── PHASE 2: MINI-AGENTS ───────────────────────────────────────
+        jobs[job_id]["phase"] = "mini_agents"
+        print(f"[job {job_id}] Phase 2: Running {len(candidates)} mini-agents...")
+
+        # Batch candidates for parallel execution
+        batches = [
+            candidates[i:i + MINI_AGENT_BATCH_SIZE]
+            for i in range(0, len(candidates), MINI_AGENT_BATCH_SIZE)
+        ]
+
+        for batch_num, batch in enumerate(batches):
+            progress_cb(ProgressEvent(
+                stage="mini_agents",
+                percent=20 + int((batch_num / len(batches)) * 60),
+                message=f"Analyzing batch {batch_num + 1} of {len(batches)} "
+                        f"({len(all_changes)} changes found so far)",
+                changes_found=len(all_changes),
+                candidates_found=len(candidates),
+                elapsed=int(time.time() - start_time),
+            ))
+
+            # Run mini-agents in parallel within this batch
+            async def run_one(cand):
+                return await asyncio.to_thread(
+                    run_mini_agent,
+                    job_id, cand, page_cache, old_path, new_path, api_key, emit_change,
+                )
+
+            results = await asyncio.gather(
+                *[run_one(cand) for cand in batch],
+                return_exceptions=True,
+            )
+
+            # Process results
+            for result in results:
+                if isinstance(result, Exception):
+                    print(f"[job {job_id}] Mini-agent exception: {result}")
+                    continue
+                total_tokens += result.get("tokens_used", 0)
+                if result.get("error"):
+                    print(f"[job {job_id}] Mini-agent {result['agent_id']} error: {result['error']}")
+
+            print(f"[job {job_id}] Batch {batch_num + 1}/{len(batches)} done. "
+                  f"Changes so far: {len(all_changes)}")
+
+        print(f"[job {job_id}] Phase 2 complete: {len(all_changes)} changes classified, "
+              f"{total_tokens:,} tokens total")
+
+        # ── PHASE 3: ANNOTATION ────────────────────────────────────────
+        jobs[job_id]["phase"] = "annotation"
+        progress_cb(ProgressEvent(
+            stage="annotating", percent=85,
+            message=f"Annotating {len(all_changes)} changes in PDFs...",
+            changes_found=len(all_changes),
+            elapsed=int(time.time() - start_time),
+        ))
+
+        # Build annotation data
+        old_annotations = []
+        new_annotations = []
+        for c in all_changes:
+            cid = c.get("id", 0)
+            if c.get("search_old"):
+                old_annotations.append({"change_id": cid, "search_text": c["search_old"]})
+            if c.get("search_new"):
+                new_annotations.append({"change_id": cid, "search_text": c["search_new"]})
+
+        job_dir = os.path.dirname(old_path)
+        old_ann_path = os.path.join(job_dir, "old_annotated.pdf")
+        new_ann_path = os.path.join(job_dir, "new_annotated.pdf")
+
+        old_ann_result = await asyncio.to_thread(annotate_pdf, old_path, old_ann_path, old_annotations)
+        new_ann_result = await asyncio.to_thread(annotate_pdf, new_path, new_ann_path, new_annotations)
+
+        print(f"[job {job_id}] Annotation: {old_ann_result['highlights']} old + "
+              f"{new_ann_result['highlights']} new highlights")
+
+        # ── BUILD FINAL RESULT ─────────────────────────────────────────
+        final_changes = []
+        for c in all_changes:
+            cid = c.get("id", 0)
+            impact_raw = c.get("impact", "MEDIUM") or "MEDIUM"
+            impact_level = impact_raw.split(" ")[0].split("—")[0].strip().upper()
+            if impact_level not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+                impact_level = "MEDIUM"
+
+            final_changes.append(ChangeItem(
+                id=cid,
+                section=c.get("section", ""),
+                title=c.get("title", ""),
+                category=c.get("category", "MODIFIED"),
+                description=c.get("description", ""),
+                old_text=c.get("old_text"),
+                new_text=c.get("new_text"),
+                impact=impact_raw,
+                impact_level=impact_level,
+                manifest_item=c.get("manifest_item"),
+                verification_status=c.get("verification_status"),
+                verification_conclusion=c.get("verification_conclusion"),
+                verification_keywords=c.get("verification_keywords", []),
+                old_page=old_ann_result["page_map"].get(cid),
+                new_page=new_ann_result["page_map"].get(cid),
+            ))
+
+        by_category = {}
+        by_impact = {}
+        for c in final_changes:
+            by_category[c.category] = by_category.get(c.category, 0) + 1
+            by_impact[c.impact_level] = by_impact.get(c.impact_level, 0) + 1
+
+        elapsed = int(time.time() - start_time)
+        mins, secs = divmod(elapsed, 60)
+
+        result = {
+            "changes": [c.model_dump() for c in final_changes],
+            "total_changes": len(final_changes),
+            "by_category": by_category,
+            "by_impact": by_impact,
+            "manifest": manifest_data,
+            "old_annotated_path": old_ann_path,
+            "new_annotated_path": new_ann_path,
+        }
+
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["result"] = result
 
-        # Signal completion through queue
+        print(f"[job {job_id}] COMPLETE: {len(final_changes)} changes in {mins}:{secs:02d}, "
+              f"{total_tokens:,} tokens")
+
         if job_id in progress_queues:
             progress_queues[job_id].put({
                 "stage": "complete", "percent": 100,
-                "message": f"Analysis complete: {result['total_changes']} changes found",
+                "message": f"Done in {mins}:{secs:02d} — {len(final_changes)} changes, "
+                           f"{total_tokens:,} tokens",
             })
+
     except Exception as e:
         tb = traceback.format_exc()
         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -159,6 +340,20 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
             progress_queues[job_id].put({
                 "stage": "failed", "percent": 0, "message": error_msg,
             })
+
+
+def _build_empty_result(old_path, new_path):
+    """Build an empty result when no changes are found."""
+    job_dir = os.path.dirname(old_path)
+    return {
+        "changes": [],
+        "total_changes": 0,
+        "by_category": {},
+        "by_impact": {},
+        "manifest": None,
+        "old_annotated_path": old_path,
+        "new_annotated_path": new_path,
+    }
 
 
 @app.get("/api/analyze/{job_id}/progress")
@@ -206,8 +401,13 @@ async def stream_progress(job_id: str):
                 continue
 
             # Got an event from the queue
+            event_type = event.get("event_type")
             stage = event.get("stage", "")
-            if stage == "complete":
+
+            if event_type == "change_found":
+                # Stream individual change to frontend
+                yield f"event: change_found\ndata: {json.dumps(event.get('change', {}))}\n\n"
+            elif stage == "complete":
                 yield f"event: complete\ndata: {json.dumps(event)}\n\n"
                 break
             elif stage == "failed":

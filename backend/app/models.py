@@ -44,6 +44,18 @@ class AnalysisResult(BaseModel):
     error: Optional[str] = None
 
 
+class CandidateChange(BaseModel):
+    """Lightweight candidate change identified by the orchestrator."""
+    id: str                         # e.g. "C001"
+    section: str                    # e.g. "2.3", "Table 3"
+    title: str                      # Brief description
+    category_hint: str              # From diff: MODIFIED, NEW, REMOVED
+    old_pages: list[int] = []       # Pages to read from old PDF
+    new_pages: list[int] = []       # Pages to read from new PDF
+    diff_preview: str = ""          # First ~200 chars of the diff
+    manifest_item: Optional[str] = None  # Matching manifest entry if any
+
+
 class ProgressEvent(BaseModel):
     stage: str
     percent: int = 0
@@ -53,4 +65,5 @@ class ProgressEvent(BaseModel):
     tokens: int = 0         # Total tokens used
     elapsed: int = 0        # Seconds elapsed
     changes_found: int = 0
+    candidates_found: int = 0
     timestamp: str = ""

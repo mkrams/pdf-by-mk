@@ -46,4 +46,6 @@ export interface ProgressEvent {
   tokens?: number;
   elapsed?: number;
   timestamp?: string;
+  changes_found?: number;
+  candidates_found?: number;
 }
