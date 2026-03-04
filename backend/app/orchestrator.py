@@ -18,6 +18,7 @@ from .pdf_utils import (
     detect_revision_history,
     diff_sections,
     extract_page_text,
+    get_page_count,
 )
 from .models import ProgressEvent
 
@@ -61,12 +62,17 @@ def run_orchestrator(
     # ── Step 1: Programmatic analysis (no Claude calls) ─────────────
     emit("orchestrator", 2, "Scanning document structure...")
 
+    old_page_count = get_page_count(old_pdf_path)
+    new_page_count = get_page_count(new_pdf_path)
+
     old_structure = detect_sections(old_pdf_path)
     new_structure = detect_sections(new_pdf_path)
-    print(f"[orchestrator {job_id}] Structure: old={old_structure['count']} sections, "
-          f"new={new_structure['count']} sections")
+    print(f"[orchestrator {job_id}] Structure: old={old_structure['count']} sections ({old_page_count} pages), "
+          f"new={new_structure['count']} sections ({new_page_count} pages)")
 
-    emit("orchestrator", 5, "Scanning for revision history...")
+    # Emit page counts early so frontend can set up PDF viewer
+    emit("orchestrator", 5, "Scanning for revision history...",
+         old_pages_count=old_page_count, new_pages_count=new_page_count)
     old_manifest = detect_revision_history(old_pdf_path)
     new_manifest = detect_revision_history(new_pdf_path)
 

@@ -9,6 +9,7 @@ export function useAnalysis(jobId: string | null) {
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [isComplete, setIsComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pageCounts, setPageCounts] = useState<{ old: number; new: number }>({ old: 0, new: 0 });
   const esRef = useRef<EventSource | null>(null);
   const isCompleteRef = useRef(false);
   const errorRef = useRef<string | null>(null);
@@ -67,6 +68,10 @@ export function useAnalysis(jobId: string | null) {
         try {
           const data = JSON.parse(e.data) as ProgressEvent;
           setProgress((prev) => [...prev, data]);
+          // Pick up page counts as soon as they arrive
+          if (data.old_pages_count && data.new_pages_count) {
+            setPageCounts({ old: data.old_pages_count, new: data.new_pages_count });
+          }
         } catch {}
       });
 
@@ -148,7 +153,7 @@ export function useAnalysis(jobId: string | null) {
     };
   }, [jobId, fetchResult]);
 
-  return { progress, streamingChanges, result, isComplete, error };
+  return { progress, streamingChanges, result, isComplete, error, pageCounts };
 }
 
 export async function startAnalysis(

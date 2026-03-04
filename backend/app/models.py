@@ -66,4 +66,6 @@ class ProgressEvent(BaseModel):
     elapsed: int = 0        # Seconds elapsed
     changes_found: int = 0
     candidates_found: int = 0
+    old_pages_count: int = 0
+    new_pages_count: int = 0
     timestamp: str = ""

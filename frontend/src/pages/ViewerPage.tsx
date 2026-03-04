@@ -483,7 +483,7 @@ function PageImage({ jobId, which, pageNum }: { jobId: string; which: string; pa
 
 export default function ViewerPage() {
   const { jobId } = useParams<{ jobId: string }>();
-  const { progress, streamingChanges, result, isComplete, error } = useAnalysis(jobId || null);
+  const { progress, streamingChanges, result, isComplete, error, pageCounts } = useAnalysis(jobId || null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
   const [catFilter, setCatFilter] = useState('');
@@ -494,7 +494,9 @@ export default function ViewerPage() {
 
   // Use final result changes when available, otherwise streaming changes during analysis
   const changes = result?.changes?.length ? result.changes : streamingChanges;
-  const totalPages = viewMode === 'old' ? (result?.old_pages || 0) : (result?.new_pages || 0);
+  const totalPages = viewMode === 'old'
+    ? (result?.old_pages || pageCounts.old || 0)
+    : (result?.new_pages || pageCounts.new || 0);
   const isAnalyzing = !isComplete && !error;
 
   // Handler: click OLD/NEW text box → switch doc + scroll to page

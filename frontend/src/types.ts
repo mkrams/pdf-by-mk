@@ -48,4 +48,6 @@ export interface ProgressEvent {
   timestamp?: string;
   changes_found?: number;
   candidates_found?: number;
+  old_pages_count?: number;
+  new_pages_count?: number;
 }
