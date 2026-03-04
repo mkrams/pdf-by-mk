@@ -120,7 +120,7 @@ function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: s
                 Analyzing...
               </h2>
               <p className="text-white/30 text-xs text-center mb-6 tracking-widest uppercase">
-                You can close this tab — analysis continues on the server
+                Identifying candidate changes...
               </p>
 
               {/* Stats row — elapsed time only */}
@@ -611,6 +611,13 @@ export default function ViewerPage() {
   const { progress, streamingChanges, result, isComplete, error, pageCounts, candidates, analyzedCandidateIds, analysisProgress, activeCandidateId } = useAnalysis(jobId || null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
+
+  // Persist job ID so closing/reloading returns to this analysis
+  useEffect(() => {
+    if (jobId) {
+      try { localStorage.setItem('pdfbymk_last_job', jobId); } catch {}
+    }
+  }, [jobId]);
   const [catFilter, setCatFilter] = useState('');
   const [viewMode, setViewMode] = useState<'old' | 'new'>('new');
   const [dark, setDark] = useState(true);

@@ -114,12 +114,16 @@ export default function UploadPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // Check for a previous analysis to resume
+  const lastJobId = (() => { try { return localStorage.getItem('pdfbymk_last_job'); } catch { return null; } })();
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!oldFile || !newFile) { setError('Please select both PDFs'); return; }
     setLoading(true);
     setError('');
     try {
+      try { localStorage.removeItem('pdfbymk_last_job'); } catch {}
       const { job_id } = await startAnalysis(
         oldFile, newFile,
         oldLabel || oldFile.name.replace('.pdf', ''),
@@ -233,6 +237,28 @@ export default function UploadPage() {
               AI-Powered Document Comparison
             </p>
           </div>
+
+          {/* Resume previous analysis */}
+          {lastJobId && (
+            <div className="mb-6 p-3 rounded-xl flex items-center justify-between"
+              style={{ background: 'rgba(0,229,255,0.08)', border: '1px solid rgba(0,229,255,0.2)' }}>
+              <span className="text-xs text-cyan-300/70">Previous analysis in progress</span>
+              <div className="flex gap-2">
+                <button type="button"
+                  onClick={() => { try { localStorage.removeItem('pdfbymk_last_job'); } catch {} window.location.reload(); }}
+                  className="px-3 py-1 text-[10px] rounded-lg font-medium text-white/40 hover:text-white/60 transition-colors"
+                  style={{ background: 'rgba(255,255,255,0.05)' }}>
+                  Dismiss
+                </button>
+                <button type="button"
+                  onClick={() => navigate(`/analyze/${lastJobId}`)}
+                  className="px-4 py-1 text-[10px] rounded-lg font-bold text-white uppercase tracking-wider transition-all"
+                  style={{ background: 'linear-gradient(135deg, #00e5ff, #00b8d4)', boxShadow: '0 0 12px rgba(0,229,255,0.3)' }}>
+                  Resume
+                </button>
+              </div>
+            </div>
+          )}
 
           <form onSubmit={handleSubmit}>
             {/* Drop zones */}

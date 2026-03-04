@@ -198,16 +198,20 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
               f"{len(page_cache)} pages cached")
 
         # Send candidate list to frontend so it can show all candidates upfront
-        if candidates and job_id in progress_queues:
+        if candidates:
             candidate_summaries = [
                 {"id": c["id"], "section": c["section"], "title": c["title"], "category_hint": c.get("category_hint", "MODIFIED")}
                 for c in candidates
             ]
-            progress_queues[job_id].put({
-                "event_type": "candidates_list",
-                "candidates": candidate_summaries,
-                "total": len(candidates),
-            })
+            # Store for reconnection replay
+            jobs[job_id]["candidates"] = candidate_summaries
+            jobs[job_id]["streaming_changes"] = all_changes  # reference to live list
+            if job_id in progress_queues:
+                progress_queues[job_id].put({
+                    "event_type": "candidates_list",
+                    "candidates": candidate_summaries,
+                    "total": len(candidates),
+                })
 
         if not candidates:
             # No changes found — still complete successfully
@@ -424,6 +428,16 @@ async def stream_progress(job_id: str):
         # Send existing progress first (catch-up for late SSE connections)
         for event in jobs[job_id].get("progress", []):
             yield f"event: progress\ndata: {json.dumps(event)}\n\n"
+
+        # Replay candidate list if available (for reconnecting viewers)
+        stored_candidates = jobs[job_id].get("candidates")
+        if stored_candidates:
+            yield f"event: candidates_list\ndata: {json.dumps({'candidates': stored_candidates, 'total': len(stored_candidates)})}\n\n"
+
+        # Replay any changes already found (for reconnecting viewers)
+        stored_changes = jobs[job_id].get("streaming_changes", [])
+        for change in list(stored_changes):  # snapshot to avoid mutation during iteration
+            yield f"event: change_found\ndata: {json.dumps(change)}\n\n"
 
         # If already done, send final event and close
         status = jobs[job_id]["status"]
