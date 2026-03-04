@@ -219,29 +219,118 @@ def search_document(pdf_path: str, query: str, context_chars: int = 120) -> dict
 # ── DIFF ENGINE ─────────────────────────────────────────────────────
 
 def _extract_section_texts(pdf_path: str) -> dict:
-    """Extract text grouped by section number."""
+    """Extract text grouped by section headers, tables, appendices, and figures.
+
+    Recognizes:
+    - Numbered sections: "1.2.3 Title..."
+    - Tables: "Table 1", "Table 2A", "Table A7.1"
+    - Appendices: "Appendix 1", "Appendix A"
+    - Figures: "Figure 1", "Figure A4.1"
+    - Legends: "Legend for Table 2"
+
+    Filters out false positives like bare numbers from table data rows.
+    """
     with pdfplumber.open(pdf_path) as pdf:
         full_text = "\n".join(p.extract_text() or "" for p in pdf.pages)
 
-    # Split by section headers
-    section_split = re.compile(r'^(\d+(?:\.\d+)*)\s+', re.MULTILINE)
+    # Patterns for document structural elements (order matters — checked first to last)
+    # Table/Figure/Appendix/Legend headers (must be at start of line, followed by title-like text or colon/dash)
+    named_header = re.compile(
+        r'^((?:Table|Figure|Appendix|Legend)\s+[\w\d\.]+(?:\s*[\-:–—]\s*.*)?)',
+        re.MULTILINE | re.IGNORECASE,
+    )
+    # Numbered section headers: "1.2.3 Title..." — require at least one dot or a following
+    # uppercase letter to distinguish from table data rows (e.g., "12 DPA Per Spec...")
+    section_header = re.compile(
+        r'^(\d+(?:\.\d+)+)\s+([A-Z])',  # Must have dots: 1.2, 2.4.3, etc.
+        re.MULTILINE,
+    )
+    # Top-level sections: "1 Introduction", "2 Requirements" — single digit + uppercase word
+    # Only match 1-digit numbers to avoid table row numbers like "12", "29"
+    toplevel_header = re.compile(
+        r'^(\d)\s+([A-Z][a-z])',  # Single digit + capitalized word
+        re.MULTILINE,
+    )
+    # Revision History as a section
+    revision_header = re.compile(
+        r'^(Revision\s+History)',
+        re.MULTILINE | re.IGNORECASE,
+    )
+
     sections = {}
     current_section = "_preamble"
     current_text = []
 
     for line in full_text.split("\n"):
-        m = section_split.match(line)
+        matched = False
+
+        # Check named headers first (Table, Figure, Appendix, Legend)
+        m = named_header.match(line)
         if m:
-            if current_text:
-                sections[current_section] = "\n".join(current_text)
-            current_section = m.group(1)
-            current_text = [line]
-        else:
+            header_text = m.group(1).strip()
+            # Normalize: "Table 2:" → "Table 2", "Legend for Table 2 – Notes" → "Legend for Table 2"
+            # Extract the key identifier
+            key = re.match(
+                r'((?:Table|Figure|Appendix|Legend)\s+[\w\d\.]+)',
+                header_text, re.IGNORECASE
+            )
+            if key:
+                if current_text:
+                    sections[current_section] = "\n".join(current_text)
+                current_section = key.group(1).strip()
+                current_text = [line]
+                matched = True
+
+        # Check revision history
+        if not matched:
+            m = revision_header.match(line)
+            if m:
+                if current_text:
+                    sections[current_section] = "\n".join(current_text)
+                current_section = "Revision History"
+                current_text = [line]
+                matched = True
+
+        # Check dotted section numbers (1.2, 2.4.3, etc.)
+        if not matched:
+            m = section_header.match(line)
+            if m:
+                if current_text:
+                    sections[current_section] = "\n".join(current_text)
+                current_section = m.group(1)
+                current_text = [line]
+                matched = True
+
+        # Check top-level sections (single digit)
+        if not matched:
+            m = toplevel_header.match(line)
+            if m:
+                if current_text:
+                    sections[current_section] = "\n".join(current_text)
+                current_section = m.group(1)
+                current_text = [line]
+                matched = True
+
+        if not matched:
             current_text.append(line)
+
     if current_text:
         sections[current_section] = "\n".join(current_text)
 
-    return sections
+    # Merge case-insensitive duplicates (e.g., "TABLE 2" and "Table 2")
+    # Keep the first occurrence's key, append text
+    normalized = {}
+    key_map = {}  # lowercase -> canonical key
+    for key, text in sections.items():
+        lower = key.lower().strip().rstrip(".:;")
+        if lower in key_map:
+            canonical = key_map[lower]
+            normalized[canonical] += "\n" + text
+        else:
+            key_map[lower] = key
+            normalized[key] = text
+
+    return normalized
 
 
 def diff_sections(old_pdf_path: str, new_pdf_path: str, section_map: Optional[dict] = None) -> dict:
@@ -252,12 +341,20 @@ def diff_sections(old_pdf_path: str, new_pdf_path: str, section_map: Optional[di
     if section_map is None:
         section_map = {}
 
+    # Build case-insensitive lookup for new sections
+    new_lower_map = {k.lower().strip(): k for k in new_sections}
+
     diffs = []
     processed_new = set()
 
     # Compare old sections against new
     for old_num, old_text in old_sections.items():
         new_num = section_map.get(old_num, old_num)
+        # Try exact match first, then case-insensitive
+        if new_num not in new_sections:
+            canonical = new_lower_map.get(new_num.lower().strip())
+            if canonical:
+                new_num = canonical
         if new_num in new_sections:
             new_text = new_sections[new_num]
             processed_new.add(new_num)
@@ -293,8 +390,9 @@ def diff_sections(old_pdf_path: str, new_pdf_path: str, section_map: Optional[di
             })
 
     # Find new sections
+    old_lower_set = {k.lower().strip() for k in old_sections}
     for new_num, new_text in new_sections.items():
-        if new_num not in processed_new and new_num not in old_sections:
+        if new_num not in processed_new and new_num.lower().strip() not in old_lower_set:
             diffs.append({
                 "old_section": None,
                 "new_section": new_num,
