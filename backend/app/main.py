@@ -193,6 +193,8 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
         manifest_data = orch_result.get("manifest")
         page_cache = orch_result.get("page_cache", {})
         total_tokens += orch_result.get("tokens_used", 0)
+        old_structure_summary = orch_result.get("old_structure_summary", "")
+        new_structure_summary = orch_result.get("new_structure_summary", "")
 
         print(f"[job {job_id}] Phase 1 complete: {len(candidates)} candidates, "
               f"{len(page_cache)} pages cached")
@@ -271,6 +273,7 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
                 return await asyncio.to_thread(
                     run_mini_agent_pass1,
                     job_id, cand, page_cache, api_key,
+                    old_structure_summary, new_structure_summary,
                 )
 
             results = await asyncio.gather(
@@ -350,6 +353,7 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
                         job_id, cand, p1_result, page_cache,
                         old_path, new_path,
                         old_page_count, new_page_count, api_key,
+                        old_structure_summary, new_structure_summary,
                     )
 
                 results = await asyncio.gather(
@@ -388,6 +392,9 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
 
         print(f"[job {job_id}] Phase 2 complete: {len(all_changes)} changes classified, "
               f"{total_tokens:,} tokens total")
+
+        # ── PHASE 2c: DEDUP — merge ADD+REMOVE pairs (renumbering) ────
+        all_changes = _dedup_renumbered_changes(all_changes, job_id)
 
         # ── PHASE 3: ANNOTATION ────────────────────────────────────────
         jobs[job_id]["phase"] = "annotation"
@@ -501,6 +508,108 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
             progress_queues[job_id].put({
                 "stage": "failed", "percent": 0, "message": error_msg,
             })
+
+
+def _dedup_renumbered_changes(changes: list[dict], job_id: str) -> list[dict]:
+    """
+    Merge complementary NEW+REMOVED pairs that represent section renumbering.
+
+    When a section is renumbered (e.g., old Section 5 → new Section 6),
+    the diff sees "Section 5 REMOVED" and "Section 6 NEW". This merges
+    them into a single STRUCTURAL change.
+    """
+    import re
+    from difflib import SequenceMatcher
+
+    new_changes = [c for c in changes if c.get("category", "").upper() in ("NEW", "ADDED")]
+    removed_changes = [c for c in changes if c.get("category", "").upper() in ("REMOVED", "DELETED")]
+
+    if not new_changes or not removed_changes:
+        return changes
+
+    def _extract_title_words(change):
+        """Extract significant words from section/title for matching."""
+        text = (change.get("title", "") + " " + change.get("section", "")).lower()
+        # Remove common prefixes like "new", "removal of", "added", etc.
+        text = re.sub(r'\b(new|added|removed|removal|of|section|the|a|an)\b', '', text)
+        words = set(re.findall(r'[a-z]{3,}', text))
+        return words
+
+    def _text_similarity(a: str, b: str) -> float:
+        """Quick similarity check between two text snippets."""
+        if not a or not b:
+            return 0.0
+        return SequenceMatcher(None, a[:500].lower(), b[:500].lower()).ratio()
+
+    merged_ids = set()  # IDs that were merged into another change
+
+    for new_c in new_changes:
+        new_words = _extract_title_words(new_c)
+        if not new_words:
+            continue
+
+        best_match = None
+        best_score = 0
+
+        for rem_c in removed_changes:
+            if rem_c.get("id") in merged_ids:
+                continue
+            rem_words = _extract_title_words(rem_c)
+            if not rem_words:
+                continue
+
+            # Word overlap score
+            overlap = len(new_words & rem_words)
+            union = len(new_words | rem_words)
+            if union == 0:
+                continue
+            word_score = overlap / union
+
+            # Also check content similarity if available
+            content_score = 0.0
+            if new_c.get("new_text") and rem_c.get("old_text"):
+                content_score = _text_similarity(new_c["new_text"], rem_c["old_text"])
+            elif new_c.get("description") and rem_c.get("description"):
+                content_score = _text_similarity(new_c["description"], rem_c["description"])
+
+            combined = max(word_score, content_score)
+            if combined > best_score:
+                best_score = combined
+                best_match = rem_c
+
+        # Threshold: >=0.5 word overlap or >=0.6 content similarity
+        if best_match and best_score >= 0.5:
+            # Merge: keep the NEW change, update it to STRUCTURAL
+            old_section = best_match.get("section", "")
+            new_section = new_c.get("section", "")
+
+            new_c["category"] = "STRUCTURAL"
+            new_c["description"] = (
+                f"Section renumbered/relocated: '{old_section}' → '{new_section}'. "
+                + (new_c.get("description", "") or "")
+            )
+            new_c["title"] = f"Renumbered: {old_section} → {new_section}"
+            new_c["impact"] = new_c.get("impact", "LOW — Section renumbering only")
+            # Preserve old text from the removed change
+            if best_match.get("old_text") and not new_c.get("old_text"):
+                new_c["old_text"] = best_match["old_text"]
+            if best_match.get("search_old") and not new_c.get("search_old"):
+                new_c["search_old"] = best_match["search_old"]
+            if best_match.get("old_page") and not new_c.get("old_page"):
+                new_c["old_page"] = best_match["old_page"]
+
+            merged_ids.add(best_match["id"])
+            print(f"[job {job_id}] Dedup: merged #{best_match['id']} (REMOVED '{old_section}') "
+                  f"into #{new_c['id']} (NEW '{new_section}') → STRUCTURAL (score={best_score:.2f})")
+
+    if merged_ids:
+        changes = [c for c in changes if c.get("id") not in merged_ids]
+        # Re-number IDs
+        for idx, c in enumerate(changes, 1):
+            c["id"] = idx
+        print(f"[job {job_id}] Dedup: merged {len(merged_ids)} pairs, {len(changes)} changes remaining")
+
+    return changes
 
 
 def _build_empty_result(old_path, new_path):

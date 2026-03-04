@@ -64,11 +64,19 @@ For UNCERTAIN:
 {"decision": "UNCERTAIN", "reason": "what's missing or unclear", \
 "notes": "any partial observations that might help a follow-up pass"}
 
+CRITICAL — RENUMBERING DETECTION:
+If a section appears to be "added" or "removed", check the document structure listings. \
+If the SAME content exists in the OTHER version under a DIFFERENT section number, this is \
+a STRUCTURAL change (renumbering), NOT a NEW or REMOVED change. Use category "STRUCTURAL" \
+and describe it as a renumbering/relocation. For example, if "Section 5: Lot Requirements" \
+in the old doc became "Section 6: Lot Requirements" in the new doc because a new section \
+was inserted before it, that's STRUCTURAL — not REMOVED + NEW.
+
 Categories:
-- NEW: content in new but not old
+- NEW: content in new but not old (truly new, not just renumbered)
 - MODIFIED: content changed between versions
-- REMOVED: content in old but not new
-- STRUCTURAL: document structure changes (numbering, ordering, layout)
+- REMOVED: content in old but not new (truly removed, not just renumbered)
+- STRUCTURAL: document structure changes (renumbering, reordering, relocation, layout)
 - FORMATTING: purely formatting changes (whitespace, line breaks, punctuation style) \
 with no substantive content difference. Still save these.
 """
@@ -117,6 +125,8 @@ def run_mini_agent_pass1(
     candidate: dict,
     page_cache: dict,
     api_key: str = "",
+    old_structure_summary: str = "",
+    new_structure_summary: str = "",
 ) -> dict:
     """
     Pass 1: Fast Sonnet triage of a single candidate.
@@ -166,10 +176,19 @@ def run_mini_agent_pass1(
     if not new_text_block and new_preview:
         new_text_block = f"(from diff — first 800 chars of new section)\n{new_preview}"
 
+    # Last resort: if still no text, search page cache for relevant content
     if not old_text_block:
-        old_text_block = "(no text available)"
+        found = _search_page_cache_for_section(page_cache, "old", candidate.get("section", ""))
+        if found:
+            old_text_block = found
+        else:
+            old_text_block = "(no text available)"
     if not new_text_block:
-        new_text_block = "(no text available)"
+        found = _search_page_cache_for_section(page_cache, "new", candidate.get("section", ""))
+        if found:
+            new_text_block = found
+        else:
+            new_text_block = "(no text available)"
 
     user_msg = (
         f"## Candidate Change: {candidate['section']}\n\n"
@@ -178,6 +197,14 @@ def run_mini_agent_pass1(
     )
     if candidate.get("manifest_item"):
         user_msg += f"**Manifest entry**: {candidate['manifest_item']}\n"
+
+    # Include document structure so agent can detect renumbering
+    if old_structure_summary or new_structure_summary:
+        user_msg += (
+            f"\n### Document Section Structure (for detecting renumbering)\n"
+            f"**Old document sections:**\n{old_structure_summary[:2000]}\n\n"
+            f"**New document sections:**\n{new_structure_summary[:2000]}\n\n"
+        )
 
     # Include diff text previews as reference
     if old_preview or new_preview:
@@ -265,6 +292,8 @@ def run_mini_agent_pass2(
     old_page_count: int,
     new_page_count: int,
     api_key: str = "",
+    old_structure_summary: str = "",
+    new_structure_summary: str = "",
 ) -> dict:
     """
     Pass 2: Opus deep analysis for candidates that Pass 1 couldn't resolve.
@@ -345,6 +374,14 @@ def run_mini_agent_pass2(
         f"**Notes**: {sonnet_notes}\n"
     )
 
+    # Include document structure so agent can detect renumbering
+    if old_structure_summary or new_structure_summary:
+        user_msg += (
+            f"\n### Document Section Structure (for detecting renumbering)\n"
+            f"**Old document sections:**\n{old_structure_summary[:2000]}\n\n"
+            f"**New document sections:**\n{new_structure_summary[:2000]}\n\n"
+        )
+
     if old_preview or new_preview:
         user_msg += f"\n### Diff Text Comparison (from programmatic diff)\n"
         if old_preview:
@@ -410,9 +447,18 @@ def run_mini_agent_pass2(
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _expand_page_range(base_pages: list[int], total_pages: int, margin: int = 2) -> list[int]:
-    """Expand a list of page numbers by adding surrounding pages."""
+    """Expand a list of page numbers by adding surrounding pages.
+    When base_pages is empty, returns a broad sample of pages from the document."""
     if not base_pages:
-        return []
+        # Fallback: sample pages across the document so the agent has *something*
+        if total_pages <= 10:
+            return list(range(1, total_pages + 1))
+        # Return first 3, middle 3, last 3 pages
+        mid = total_pages // 2
+        pages = set(range(1, min(4, total_pages + 1)))
+        pages.update(range(max(1, mid - 1), min(total_pages + 1, mid + 2)))
+        pages.update(range(max(1, total_pages - 2), total_pages + 1))
+        return sorted(pages)
     all_pages = set()
     for p in base_pages:
         for offset in range(-margin, margin + 1):
@@ -420,6 +466,45 @@ def _expand_page_range(base_pages: list[int], total_pages: int, margin: int = 2)
             if 1 <= candidate <= total_pages:
                 all_pages.add(candidate)
     return sorted(all_pages)
+
+
+def _search_page_cache_for_section(page_cache: dict, pdf_id: str, section_ref: str) -> str:
+    """Search the page cache for pages that mention a section reference.
+    Returns formatted text block or empty string."""
+    if not section_ref:
+        return ""
+    ref_lower = section_ref.lower().strip()
+    # Extract key terms to search for
+    import re
+    terms = re.findall(r'[a-z]{3,}', ref_lower)
+    # Also try the section number itself
+    num_match = re.match(r'[\d.]+', section_ref.strip())
+    if num_match:
+        terms.append(num_match.group())
+
+    if not terms:
+        return ""
+
+    matching_pages = []
+    for (pid, page_num), text in page_cache.items():
+        if pid != pdf_id or not text:
+            continue
+        text_lower = text.lower()
+        # Score: how many search terms appear on this page
+        score = sum(1 for t in terms if t in text_lower)
+        if score >= max(1, len(terms) // 2):
+            matching_pages.append((score, page_num, text))
+
+    if not matching_pages:
+        return ""
+
+    # Return top 2 matching pages
+    matching_pages.sort(key=lambda x: (-x[0], x[1]))
+    parts = []
+    for score, page_num, text in matching_pages[:2]:
+        parts.append(f"--- {pdf_id.upper()} Page {page_num} (found by search) ---\n{text}")
+
+    return "\n\n".join(parts)
 
 
 def _parse_json_response(text: str) -> dict:

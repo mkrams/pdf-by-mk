@@ -270,11 +270,22 @@ def run_orchestrator(
           f"Candidates={len(candidates)}, Pages cached={len(page_cache)}, "
           f"Tokens={tokens_used}")
 
+    # Build compact structure summaries for mini-agents
+    def _structure_summary(struct):
+        sections = struct.get("sections", [])
+        lines = []
+        for s in sections[:80]:  # cap to avoid bloating prompts
+            title = s.get("title", "")
+            lines.append(f"  {s['number']}: {title} (p{s['page']})" if title else f"  {s['number']} (p{s['page']})")
+        return "\n".join(lines) if lines else "(no sections detected)"
+
     return {
         "candidates": candidates,
         "manifest": manifest if manifest.get("detected") else None,
         "page_cache": page_cache,
         "tokens_used": tokens_used,
+        "old_structure_summary": _structure_summary(old_structure),
+        "new_structure_summary": _structure_summary(new_structure),
     }
 
 
@@ -296,13 +307,45 @@ def _find_pages_for_section(section_ref: str, structure: dict) -> list[int]:
             page = s["page"]
             return [page, page + 1]
 
+    # Reverse partial match (e.g., ref "2.3.1" matches structure "2.3")
+    for s in sections:
+        s_num = s["number"].lower().strip()
+        if ref_lower.startswith(s_num + ".") or ref_lower.startswith(s_num + " "):
+            page = s["page"]
+            return [page, page + 1]
+
     # If section_ref looks like "Table 3", try matching title
     for s in sections:
         if ref_lower in s["number"].lower() or ref_lower in s.get("title", "").lower():
             page = s["page"]
             return [page, page + 1]
 
-    return []  # Couldn't find — mini-agent will search
+    # Try extracting just the numeric part and matching
+    num_match = re.match(r'^(?:section|clause|table|appendix|annex|figure|fig\.?)\s*(\d[\d.]*)', ref_lower)
+    if num_match:
+        just_num = num_match.group(1).rstrip(".")
+        for s in sections:
+            s_num = s["number"].lower().strip()
+            if s_num == just_num or s_num.startswith(just_num + "."):
+                page = s["page"]
+                return [page, page + 1]
+
+    # Fuzzy: try matching any significant word from the ref against section titles
+    ref_words = set(re.findall(r'[a-z]{3,}', ref_lower)) - {"the", "and", "for", "section", "table"}
+    if ref_words:
+        best_score = 0
+        best_page = None
+        for s in sections:
+            title_lower = (s.get("title", "") + " " + s["number"]).lower()
+            title_words = set(re.findall(r'[a-z]{3,}', title_lower))
+            overlap = len(ref_words & title_words)
+            if overlap > best_score:
+                best_score = overlap
+                best_page = s["page"]
+        if best_score >= 2 or (best_score >= 1 and len(ref_words) <= 2):
+            return [best_page, best_page + 1]
+
+    return []  # Couldn't find — mini-agent will get broader context
 
 
 def _normalize_section_ref(ref: str) -> str:
