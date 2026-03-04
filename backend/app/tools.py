@@ -2,6 +2,7 @@
 Tool definitions for the Claude agent, and their server-side execution.
 """
 import json
+import re
 from . import pdf_utils
 
 # ── TOOL DEFINITIONS (Claude API format) ────────────────────────────
@@ -185,6 +186,84 @@ TOOL_DEFINITIONS = [
 ]
 
 
+# ── ROBUST JSON PARSING ─────────────────────────────────────────────
+
+def _robust_parse_changes(raw) -> list:
+    """
+    Parse changes from various formats Claude might send:
+    - A proper list of dicts (ideal)
+    - A JSON string encoding a list of dicts
+    - A double-encoded JSON string
+    - A truncated JSON string (attempt repair)
+    """
+    # Already a list — great
+    if isinstance(raw, list):
+        return [c for c in raw if isinstance(c, dict)]
+
+    # Must be a string at this point
+    if not isinstance(raw, str):
+        print(f"[tools] _robust_parse_changes: unexpected type {type(raw).__name__}")
+        return []
+
+    s = raw.strip()
+    print(f"[tools] _robust_parse_changes: string len={len(s)}, first 300 chars: {s[:300]}")
+    print(f"[tools] _robust_parse_changes: last 200 chars: {s[-200:]}")
+
+    # Try direct parse
+    try:
+        parsed = json.loads(s)
+        if isinstance(parsed, list):
+            result = [c for c in parsed if isinstance(c, dict)]
+            print(f"[tools] _robust_parse_changes: direct parse OK, {len(result)} dicts from {len(parsed)} items")
+            return result
+        elif isinstance(parsed, dict):
+            # Maybe Claude wrapped it in a dict
+            if "changes" in parsed and isinstance(parsed["changes"], list):
+                result = [c for c in parsed["changes"] if isinstance(c, dict)]
+                print(f"[tools] _robust_parse_changes: parsed dict with 'changes' key, {len(result)} items")
+                return result
+            # Single change object?
+            if "section" in parsed and "title" in parsed:
+                print(f"[tools] _robust_parse_changes: parsed single change dict")
+                return [parsed]
+        elif isinstance(parsed, str):
+            # Double-encoded — try again
+            print(f"[tools] _robust_parse_changes: double-encoded string, trying again")
+            return _robust_parse_changes(parsed)
+        print(f"[tools] _robust_parse_changes: parsed to {type(parsed).__name__}, not usable")
+    except json.JSONDecodeError as e:
+        print(f"[tools] _robust_parse_changes: direct parse failed: {e}")
+
+    # Try to repair truncated JSON — find all complete objects
+    # Look for individual JSON objects within the string
+    results = []
+    depth = 0
+    start = None
+    for i, ch in enumerate(s):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start is not None:
+                obj_str = s[start:i+1]
+                try:
+                    obj = json.loads(obj_str)
+                    if isinstance(obj, dict) and ("section" in obj or "title" in obj or "category" in obj):
+                        results.append(obj)
+                except json.JSONDecodeError:
+                    pass
+                start = None
+
+    if results:
+        print(f"[tools] _robust_parse_changes: extracted {len(results)} objects via manual parsing")
+        return results
+
+    print(f"[tools] _robust_parse_changes: all parsing methods failed, returning empty")
+    return []
+
+
 # ── TOOL EXECUTION ──────────────────────────────────────────────────
 
 def execute_tool(tool_name: str, tool_input: dict, job_context: dict) -> str:
@@ -245,27 +324,12 @@ def execute_tool(tool_name: str, tool_input: dict, job_context: dict) -> str:
         elif tool_name == "submit_changes":
             # Store changes in job context for the orchestrator to pick up
             raw_changes = tool_input.get("changes", [])
-            print(f"[tools] submit_changes: raw_changes type={type(raw_changes).__name__}, len={len(raw_changes) if isinstance(raw_changes, list) else 'N/A'}")
-            if isinstance(raw_changes, list) and len(raw_changes) > 0:
-                print(f"[tools] submit_changes: first item type={type(raw_changes[0]).__name__}, preview={repr(raw_changes[0])[:200]}")
-            # Defensive: ensure changes is a list of dicts
-            if isinstance(raw_changes, str):
-                print(f"[tools] submit_changes: WARNING changes is a string, parsing")
-                try:
-                    raw_changes = json.loads(raw_changes)
-                except (json.JSONDecodeError, TypeError):
-                    raw_changes = []
-            if not isinstance(raw_changes, list):
-                print(f"[tools] submit_changes: WARNING changes is {type(raw_changes).__name__}, defaulting to []")
-                raw_changes = []
-            # Filter out any non-dict items
-            validated = [c for c in raw_changes if isinstance(c, dict)]
-            rejected = len(raw_changes) - len(validated)
-            if rejected > 0:
-                print(f"[tools] submit_changes: WARNING rejected {rejected} non-dict items")
-                for i, c in enumerate(raw_changes):
-                    if not isinstance(c, dict):
-                        print(f"[tools] submit_changes: rejected item #{i}: type={type(c).__name__}, value={repr(c)[:100]}")
+            print(f"[tools] submit_changes: raw_changes type={type(raw_changes).__name__}, "
+                  f"len={len(raw_changes) if isinstance(raw_changes, (list, str)) else 'N/A'}")
+
+            # Use robust parsing that handles strings, double-encoding, truncation
+            validated = _robust_parse_changes(raw_changes)
+
             job_context["submitted_changes"] = validated
             raw_manifest = tool_input.get("manifest")
             if isinstance(raw_manifest, str):
@@ -281,4 +345,7 @@ def execute_tool(tool_name: str, tool_input: dict, job_context: dict) -> str:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[tools] Error in {tool_name}: {tb}")
         return json.dumps({"error": str(e)})

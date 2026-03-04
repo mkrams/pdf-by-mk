@@ -28,7 +28,108 @@ function Badge({ text, colors }: { text: string; colors: string }) {
   return <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${colors}`}>{text}</span>;
 }
 
-// ── Progress Monitor ─────────────────────────────────────────────
+// ── Miami Vice Sun Animation ────────────────────────────────────
+
+function MiamiSun({ percent }: { percent: number }) {
+  // Sun travels across the sky: 0% = left horizon (sunrise), 50% = top (noon), 100% = right horizon (sunset)
+  // Map percent to a position on an arc
+  const t = percent / 100;
+  // x goes from 10% to 90%
+  const x = 10 + t * 80;
+  // y follows a parabola: highest at t=0.5
+  const y = 85 - (1 - 4 * (t - 0.5) * (t - 0.5)) * 70;
+
+  // Sky color transitions: night → dawn → day → dusk → night
+  const skyColors = t < 0.15
+    ? 'rgba(10,0,26,1)' // night
+    : t < 0.3
+    ? `rgba(${Math.round(26 + (t - 0.15) / 0.15 * 20)},${Math.round(5 + (t - 0.15) / 0.15 * 10)},${Math.round(51 + (t - 0.15) / 0.15 * 30)},1)` // dawn
+    : t < 0.7
+    ? 'rgba(45,15,80,1)' // day (still purple-ish, Miami Vice style)
+    : t < 0.85
+    ? `rgba(${Math.round(45 - (t - 0.7) / 0.15 * 20)},${Math.round(15 - (t - 0.7) / 0.15 * 10)},${Math.round(80 - (t - 0.7) / 0.15 * 30)},1)` // dusk
+    : 'rgba(10,0,26,1)'; // night again
+
+  // Sun glow intensity
+  const glowIntensity = t < 0.1 ? t / 0.1 : t > 0.9 ? (1 - t) / 0.1 : 1;
+
+  return (
+    <svg viewBox="0 0 100 100" className="absolute inset-0 w-full h-full" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="sunGradAnim" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#ff2d95" />
+          <stop offset="100%" stopColor="#ffb347" />
+        </linearGradient>
+        <radialGradient id="sunGlow" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor="rgba(255,45,149,0.4)" />
+          <stop offset="100%" stopColor="rgba(255,45,149,0)" />
+        </radialGradient>
+      </defs>
+      {/* Sky background */}
+      <rect width="100" height="100" fill={skyColors} />
+      {/* Stars (visible at low percent) */}
+      {(t < 0.2 || t > 0.8) && (
+        <g opacity={t < 0.2 ? 1 - t / 0.2 : (t - 0.8) / 0.2}>
+          {[
+            [15, 20], [30, 12], [50, 8], [70, 15], [85, 22],
+            [20, 35], [40, 28], [60, 18], [80, 30], [45, 40],
+            [10, 45], [90, 38], [25, 50], [75, 45],
+          ].map(([sx, sy], i) => (
+            <circle key={i} cx={sx} cy={sy} r={0.3 + (i % 3) * 0.2} fill="white" opacity={0.5 + (i % 3) * 0.2} />
+          ))}
+        </g>
+      )}
+      {/* Sun glow */}
+      <circle cx={x} cy={y} r={12} fill="url(#sunGlow)" opacity={glowIntensity * 0.6} />
+      {/* Sun */}
+      <circle cx={x} cy={y} r={5} fill="url(#sunGradAnim)" opacity={glowIntensity} />
+      {/* Horizontal lines through sun */}
+      {[0, 1.5, 2.7, 3.6, 4.3, 4.8].map((offset, i) => (
+        <rect key={i} x={x - 5} y={y + offset - 2.5} width={10} height={0.5}
+          fill="rgba(20,0,40,0.5)" opacity={glowIntensity} />
+      ))}
+      {/* Water / horizon */}
+      <rect x="0" y="85" width="100" height="15" fill="rgba(0,0,20,0.8)" />
+      {/* Water reflection */}
+      <ellipse cx={x} cy="88" rx={6 * glowIntensity} ry={2} fill="rgba(255,45,149,0.15)" opacity={glowIntensity} />
+      {/* Buildings silhouette */}
+      <g fill="rgba(10,0,26,0.95)">
+        <rect x="5" y="70" width="6" height="15" />
+        <rect x="12" y="62" width="8" height="23" />
+        <rect x="21" y="72" width="5" height="13" />
+        <rect x="27" y="55" width="7" height="30" />
+        <rect x="35" y="65" width="5.5" height="20" />
+        <rect x="42" y="58" width="9" height="27" />
+        <rect x="52" y="48" width="8" height="37" />
+        <rect x="61" y="60" width="7" height="25" />
+        <rect x="69" y="68" width="6" height="17" />
+        <rect x="76" y="55" width="8.5" height="30" />
+        <rect x="85" y="65" width="5" height="20" />
+        <rect x="91" y="70" width="7" height="15" />
+      </g>
+      {/* Palm tree silhouettes */}
+      <g fill="rgba(5,0,15,0.9)">
+        <rect x="17" y="64" width="1" height="21" rx="0.5" />
+        <ellipse cx="14" cy="63" rx="5" ry="1.2" transform="rotate(-20 14 63)" />
+        <ellipse cx="20" cy="62" rx="4.5" ry="1" transform="rotate(15 20 62)" />
+        <rect x="82" y="66" width="1" height="19" rx="0.5" />
+        <ellipse cx="79" cy="65" rx="4.5" ry="1.1" transform="rotate(-18 79 65)" />
+        <ellipse cx="85" cy="64.5" rx="4" ry="1" transform="rotate(20 85 64.5)" />
+      </g>
+      {/* Retro grid on water */}
+      <g stroke="rgba(0,229,255,0.08)" strokeWidth="0.2" fill="none">
+        {[88, 91, 94, 97].map(gy => (
+          <line key={gy} x1="0" y1={gy} x2="100" y2={gy} />
+        ))}
+        {[10, 20, 30, 40, 50, 60, 70, 80, 90].map(gx => (
+          <line key={gx} x1={gx} y1="85" x2={gx < 50 ? gx - 10 : gx + 10} y2="100" />
+        ))}
+      </g>
+    </svg>
+  );
+}
+
+// ── Progress Monitor (Miami Vice style) ─────────────────────────
 
 function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: string | null }) {
   const latest = events[events.length - 1];
@@ -52,60 +153,108 @@ function ProgressMonitor({ events, error }: { events: ProgressEvent[]; error?: s
   const currentTurn = turnMatch ? parseInt(turnMatch[1]) : 0;
   const maxTurns = turnMatch ? parseInt(turnMatch[2]) : 15;
   const tokens = tokenMatch ? tokenMatch[1] : '0';
-  const isStale = events.length > 0 && elapsed > 5 && !error;
 
   return (
-    <div className="flex-1 flex flex-col items-center justify-center p-8 bg-slate-900 text-white">
-      <div className="max-w-lg w-full">
-        {error ? (
-          <>
-            <div className="text-center mb-6">
-              <h2 className="text-xl font-bold text-red-400 mb-2">Analysis Failed</h2>
-              <p className="text-slate-400 text-sm mb-4 max-w-sm mx-auto break-words">{error}</p>
+    <div className="flex-1 flex flex-col relative overflow-hidden"
+      style={{ background: 'linear-gradient(180deg, #0a001a 0%, #1a0533 50%, #0a001a 100%)' }}>
+
+      {/* Animated sun background */}
+      <MiamiSun percent={pct} />
+
+      {/* Content overlay */}
+      <div className="relative z-10 flex-1 flex flex-col items-center justify-center p-8">
+        <div className="max-w-lg w-full">
+          {error ? (
+            <div className="text-center backdrop-blur-md rounded-2xl p-8"
+              style={{ background: 'rgba(15,5,30,0.75)', border: '1px solid rgba(255,45,149,0.3)' }}>
+              <h2 className="text-2xl font-black italic mb-3"
+                style={{
+                  background: 'linear-gradient(135deg, #ff2d95, #ff6fb5)',
+                  WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+                }}>Analysis Failed</h2>
+              <p className="text-white/50 text-sm mb-6 max-w-sm mx-auto break-words">{error}</p>
               <button onClick={() => window.location.href = '/'}
-                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium">
+                className="px-8 py-3 font-bold text-white rounded-xl text-sm uppercase tracking-widest"
+                style={{
+                  background: 'linear-gradient(135deg, #ff2d95, #d926ff, #00e5ff)',
+                  boxShadow: '0 0 30px rgba(255,45,149,0.4)',
+                }}>
                 Try Again
               </button>
             </div>
-          </>
-        ) : (
-          <>
-            <h2 className="text-2xl font-bold mb-2 text-center">Analyzing Documents...</h2>
-            <p className="text-slate-400 text-xs text-center mb-6">You can close this tab — analysis continues on the server</p>
-            <div className="flex justify-center gap-6 mb-6">
-              <div className="text-center">
-                <div className="text-2xl font-mono font-bold text-blue-400">{mins}:{secs.toString().padStart(2, '0')}</div>
-                <div className="text-[10px] text-slate-500 uppercase tracking-wider">Elapsed</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-mono font-bold text-emerald-400">{currentTurn}<span className="text-slate-600">/{maxTurns}</span></div>
-                <div className="text-[10px] text-slate-500 uppercase tracking-wider">AI Turns</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-mono font-bold text-amber-400">{tokens}</div>
-                <div className="text-[10px] text-slate-500 uppercase tracking-wider">Tokens</div>
-              </div>
-            </div>
-            <div className="w-full bg-slate-700 rounded-full h-2.5 mb-3">
-              <div className={`bg-blue-500 h-2.5 rounded-full transition-all duration-700 ease-out ${isStale && pct < 100 ? 'animate-pulse' : ''}`}
-                style={{ width: `${Math.max(pct, 2)}%` }} />
-            </div>
-            <div className="text-center text-slate-400 text-xs mb-6">
-              {latest?.message?.replace(/^\[[\d:]+\]\s*Turn \d+\/\d+\s*\|\s*[\d,]+ tokens\s*\|\s*/, '') || 'Connecting...'}
-            </div>
-            <div ref={logRef} className="bg-slate-800/60 rounded-lg p-3 max-h-48 overflow-y-auto border border-slate-700">
-              {events.length === 0 ? (
-                <div className="text-[11px] text-slate-500 py-0.5 font-mono animate-pulse">Waiting for agent...</div>
-              ) : events.map((ev, i) => (
-                <div key={i} className="text-[11px] text-slate-400 py-0.5 font-mono flex gap-2">
-                  <span className="text-blue-500/60 min-w-[3ch] text-right">{ev.percent}%</span>
-                  <span className="text-slate-500">|</span>
-                  <span>{ev.message}</span>
+          ) : (
+            <div className="backdrop-blur-md rounded-2xl p-8"
+              style={{ background: 'rgba(15,5,30,0.65)', border: '1px solid rgba(255,255,255,0.08)',
+                boxShadow: '0 0 60px rgba(255,45,149,0.1), 0 25px 50px rgba(0,0,0,0.5)' }}>
+
+              <h2 className="text-3xl font-black italic mb-1 text-center"
+                style={{
+                  background: 'linear-gradient(135deg, #ff2d95 0%, #ff6fb5 30%, #00e5ff 70%, #00b8d4 100%)',
+                  WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+                  filter: 'drop-shadow(0 0 20px rgba(255,45,149,0.3))',
+                }}>
+                Analyzing...
+              </h2>
+              <p className="text-white/30 text-xs text-center mb-6 tracking-widest uppercase">
+                You can close this tab — analysis continues on the server
+              </p>
+
+              {/* Stats row */}
+              <div className="flex justify-center gap-6 mb-6">
+                <div className="text-center">
+                  <div className="text-2xl font-mono font-bold" style={{ color: '#ff2d95' }}>
+                    {mins}:{secs.toString().padStart(2, '0')}
+                  </div>
+                  <div className="text-[10px] text-white/30 uppercase tracking-wider">Elapsed</div>
                 </div>
-              ))}
+                <div className="text-center">
+                  <div className="text-2xl font-mono font-bold" style={{ color: '#00e5ff' }}>
+                    {currentTurn}<span style={{ color: 'rgba(255,255,255,0.2)' }}>/{maxTurns}</span>
+                  </div>
+                  <div className="text-[10px] text-white/30 uppercase tracking-wider">AI Turns</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-2xl font-mono font-bold" style={{ color: '#ffb347' }}>
+                    {tokens}
+                  </div>
+                  <div className="text-[10px] text-white/30 uppercase tracking-wider">Tokens</div>
+                </div>
+              </div>
+
+              {/* Neon progress bar */}
+              <div className="w-full rounded-full h-2 mb-3"
+                style={{ background: 'rgba(255,255,255,0.05)' }}>
+                <div className="h-2 rounded-full transition-all duration-700 ease-out"
+                  style={{
+                    width: `${Math.max(pct, 2)}%`,
+                    background: 'linear-gradient(90deg, #ff2d95, #d926ff, #00e5ff)',
+                    boxShadow: '0 0 12px rgba(255,45,149,0.5), 0 0 24px rgba(0,229,255,0.3)',
+                  }} />
+              </div>
+
+              {/* Current action */}
+              <div className="text-center text-sm mb-6" style={{ color: 'rgba(255,255,255,0.5)' }}>
+                {latest?.message?.replace(/^\[[\d:]+\]\s*Turn \d+\/\d+\s*\|\s*[\d,]+ tokens\s*\|\s*/, '') || 'Connecting to the engine...'}
+              </div>
+
+              {/* Activity log */}
+              <div ref={logRef} className="rounded-xl p-3 max-h-36 overflow-y-auto"
+                style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                {events.length === 0 ? (
+                  <div className="text-[11px] py-0.5 font-mono animate-pulse" style={{ color: 'rgba(0,229,255,0.5)' }}>
+                    Warming up the AI engine...
+                  </div>
+                ) : events.map((ev, i) => (
+                  <div key={i} className="text-[11px] py-0.5 font-mono flex gap-2">
+                    <span style={{ color: 'rgba(255,45,149,0.5)' }} className="min-w-[3ch] text-right">{ev.percent}%</span>
+                    <span style={{ color: 'rgba(255,255,255,0.1)' }}>|</span>
+                    <span style={{ color: 'rgba(255,255,255,0.4)' }}>{ev.message}</span>
+                  </div>
+                ))}
+              </div>
             </div>
-          </>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );
@@ -272,18 +421,30 @@ export default function ViewerPage() {
   const [viewMode, setViewMode] = useState<'old' | 'new'>('new');
   const [dark, setDark] = useState(true);
 
+  const changes = result?.changes || [];
+
+  // Debug logging
+  useEffect(() => {
+    console.log('[ViewerPage] State:', {
+      hasResult: !!result,
+      isComplete,
+      error,
+      changesCount: changes.length,
+      resultKeys: result ? Object.keys(result) : [],
+    });
+  }, [result, isComplete, error, changes.length]);
+
   // Select first change when results arrive
   useEffect(() => {
-    if (result?.changes.length && !selectedId) {
-      setSelectedId(result.changes[0].id);
+    if (changes.length && !selectedId) {
+      setSelectedId(changes[0].id);
     }
-  }, [result]);
+  }, [changes.length]);
 
   // Keyboard navigation
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
-      const changes = result?.changes || [];
       const idx = changes.findIndex(c => c.id === selectedId);
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
@@ -296,11 +457,14 @@ export default function ViewerPage() {
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [result, selectedId]);
+  }, [changes, selectedId]);
 
-  const selectedChange = result?.changes.find(c => c.id === selectedId) || null;
+  const selectedChange = changes.find(c => c.id === selectedId) || null;
 
   if (!jobId) return <div className="p-8">No job ID</div>;
+
+  // Determine what to show
+  const hasResults = result && changes.length > 0;
 
   return (
     <div className={`h-screen flex flex-col ${dark ? 'dark' : ''}`}>
@@ -317,7 +481,7 @@ export default function ViewerPage() {
         {result && (
           <div className="flex gap-2 text-[10px]">
             <span className="bg-white/15 px-2 py-0.5 rounded-full">{result.total_changes} changes</span>
-            {Object.entries(result.by_impact).map(([k, v]) => (
+            {Object.entries(result.by_impact || {}).map(([k, v]) => (
               <span key={k} className="bg-white/10 px-2 py-0.5 rounded-full">{k}: {v}</span>
             ))}
           </div>
@@ -331,11 +495,11 @@ export default function ViewerPage() {
       </div>
 
       {/* Main content */}
-      {result ? (
+      {hasResults ? (
         <div className="flex flex-1 overflow-hidden bg-white dark:bg-gray-950">
           {/* Left: change list */}
           <ChangeList
-            changes={result.changes}
+            changes={changes}
             selectedId={selectedId}
             onSelect={setSelectedId}
             search={search} onSearch={setSearch}
@@ -420,7 +584,7 @@ export default function ViewerPage() {
               ))}
             </div>
             <DocumentMap
-              changes={result.changes}
+              changes={changes}
               selectedId={selectedId}
               onSelect={setSelectedId}
               viewMode={viewMode}
@@ -429,13 +593,43 @@ export default function ViewerPage() {
         </div>
       ) : isComplete && error ? (
         <ProgressMonitor events={progress} error={error} />
-      ) : isComplete ? (
-        <div className="flex-1 flex items-center justify-center text-gray-400">
-          <div className="text-center">
-            <p className="mb-2">Analysis complete but no results available.</p>
+      ) : isComplete && result ? (
+        /* Analysis completed but 0 changes — show a message */
+        <div className="flex-1 flex items-center justify-center"
+          style={{ background: 'linear-gradient(180deg, #0a001a 0%, #1a0533 50%, #0a001a 100%)' }}>
+          <div className="text-center backdrop-blur-md rounded-2xl p-8"
+            style={{ background: 'rgba(15,5,30,0.75)', border: '1px solid rgba(0,229,255,0.3)' }}>
+            <h2 className="text-2xl font-black italic mb-3"
+              style={{
+                background: 'linear-gradient(135deg, #00e5ff, #00b8d4)',
+                WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+              }}>No Changes Found</h2>
+            <p className="text-white/40 text-sm mb-6">The AI agent completed analysis but found no differences between the documents.</p>
             <button onClick={() => window.location.href = '/'}
-              className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm">
-              Start New Analysis
+              className="px-8 py-3 font-bold text-white rounded-xl text-sm uppercase tracking-widest"
+              style={{
+                background: 'linear-gradient(135deg, #ff2d95, #d926ff, #00e5ff)',
+                boxShadow: '0 0 30px rgba(255,45,149,0.4)',
+              }}>
+              Try Again
+            </button>
+          </div>
+        </div>
+      ) : isComplete ? (
+        <div className="flex-1 flex items-center justify-center"
+          style={{ background: 'linear-gradient(180deg, #0a001a 0%, #1a0533 50%, #0a001a 100%)' }}>
+          <div className="text-center backdrop-blur-md rounded-2xl p-8"
+            style={{ background: 'rgba(15,5,30,0.75)', border: '1px solid rgba(255,255,255,0.1)' }}>
+            <p className="text-white/40 mb-4">Analysis complete but results couldn't be loaded.</p>
+            <button onClick={() => window.location.reload()}
+              className="px-6 py-2 mr-3 font-bold text-white rounded-lg text-sm"
+              style={{ background: 'linear-gradient(135deg, #00e5ff, #00b8d4)' }}>
+              Refresh
+            </button>
+            <button onClick={() => window.location.href = '/'}
+              className="px-6 py-2 font-bold text-white/60 rounded-lg text-sm"
+              style={{ background: 'rgba(255,255,255,0.1)' }}>
+              Start Over
             </button>
           </div>
         </div>

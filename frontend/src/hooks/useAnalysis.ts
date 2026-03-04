@@ -19,20 +19,41 @@ export function useAnalysis(jobId: string | null) {
 
   const fetchResult = useCallback(async (id: string): Promise<boolean> => {
     try {
+      console.log(`[useAnalysis] Fetching result for ${id}...`);
       const res = await fetch(`${API}/api/analyze/${id}/result`);
-      if (!res.ok) return false;
+      console.log(`[useAnalysis] Response status: ${res.status}`);
+      if (!res.ok) {
+        console.log(`[useAnalysis] Response not OK, returning false`);
+        return false;
+      }
       const data = await res.json();
+      console.log(`[useAnalysis] Result data:`, {
+        status: data.status,
+        changesCount: data.changes?.length,
+        totalChanges: data.total_changes,
+        hasError: !!data.error,
+        keys: Object.keys(data),
+      });
+
       if (data.status === 'completed') {
+        // Ensure changes array exists
+        if (!data.changes) {
+          console.warn(`[useAnalysis] Result has status=completed but no changes array!`);
+          data.changes = [];
+        }
         setResult(data);
         setIsComplete(true);
+        console.log(`[useAnalysis] Set result with ${data.changes.length} changes`);
         return true;
       } else if (data.status === 'failed') {
         setError(data.error || 'Analysis failed');
-        setIsComplete(true);  // Mark complete so we don't show progress bar
+        setIsComplete(true);
+        console.log(`[useAnalysis] Analysis failed: ${data.error}`);
         return true;
       }
-    } catch {
-      // Network error — don't set error state, just return false
+      console.log(`[useAnalysis] Status is '${data.status}', still processing`);
+    } catch (err) {
+      console.error(`[useAnalysis] fetchResult error:`, err);
     }
     return false;
   }, []);
@@ -46,11 +67,12 @@ export function useAnalysis(jobId: string | null) {
     fetchResult(jobId).then(done => {
       if (cancelled) return;
       if (done) {
-        // Already finished — don't connect SSE at all
+        console.log(`[useAnalysis] Result already available, skipping SSE`);
         return;
       }
 
       // Not finished yet — connect SSE for live progress
+      console.log(`[useAnalysis] Connecting SSE for ${jobId}`);
       const es = new EventSource(`${API}/api/analyze/${jobId}/progress`);
       esRef.current = es;
 
@@ -64,6 +86,7 @@ export function useAnalysis(jobId: string | null) {
 
       es.addEventListener('complete', async (e) => {
         if (cancelled) return;
+        console.log(`[useAnalysis] SSE complete event received`);
         try {
           const data = JSON.parse(e.data);
           setProgress((prev) => [...prev, {
@@ -74,12 +97,25 @@ export function useAnalysis(jobId: string | null) {
         es.close();
         esRef.current = null;
         // Fetch the full result
-        await fetchResult(jobId);
+        const fetched = await fetchResult(jobId);
+        console.log(`[useAnalysis] Post-SSE-complete fetchResult: ${fetched}`);
+        if (!fetched) {
+          // Retry once after a short delay
+          console.log(`[useAnalysis] First fetch failed, retrying in 2s...`);
+          await new Promise(r => setTimeout(r, 2000));
+          const retried = await fetchResult(jobId);
+          console.log(`[useAnalysis] Retry fetchResult: ${retried}`);
+          if (!retried) {
+            setError('Analysis completed but failed to load results. Please refresh the page.');
+            setIsComplete(true);
+          }
+        }
       });
 
-      // Listen for "failed" named event (backend sends event: failed)
+      // Listen for "failed" named event
       es.addEventListener('failed', (e) => {
         if (cancelled) return;
+        console.log(`[useAnalysis] SSE failed event received`);
         try {
           const data = JSON.parse(e.data);
           setError(data.error || 'Analysis failed');
@@ -92,30 +128,28 @@ export function useAnalysis(jobId: string | null) {
         esRef.current = null;
       });
 
-      // Built-in error handler — fires on network issues or when server closes
+      // Built-in error handler
       es.addEventListener('error', () => {
         if (cancelled) return;
+        console.log(`[useAnalysis] SSE error, readyState=${es.readyState}`);
         if (es.readyState === EventSource.CLOSED) {
-          // Connection was closed by server — try fetching result
           fetchResult(jobId);
         }
-        // If CONNECTING, EventSource will auto-reconnect (that's fine)
       });
     });
 
-    // Poll every 8s as fallback (handles tab reopen, SSE drops)
+    // Poll every 6s as fallback
     const poll = setInterval(() => {
-      // Use refs to avoid stale closure
       if (!isCompleteRef.current && !errorRef.current) {
         fetchResult(jobId).then(done => {
           if (done && esRef.current) {
-            // If poll found it's done, close SSE
+            console.log(`[useAnalysis] Poll found completion, closing SSE`);
             esRef.current.close();
             esRef.current = null;
           }
         });
       }
-    }, 8000);
+    }, 6000);
 
     return () => {
       cancelled = true;
