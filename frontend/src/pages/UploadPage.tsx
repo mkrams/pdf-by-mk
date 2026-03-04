@@ -332,7 +332,7 @@ export default function UploadPage() {
           </form>
 
           <div className="mt-6 text-center text-[10px] text-white/20 tracking-wider uppercase">
-            Powered by Claude AI &middot; Drop any PDF pair up to 50 pages
+            Powered by Claude AI + <a href="https://github.com/docling-project/docling" target="_blank" rel="noopener noreferrer" className="underline hover:text-white/40 transition-colors">Docling</a> &middot; Drop any PDF pair up to 50 pages
           </div>
         </div>
       </div>
