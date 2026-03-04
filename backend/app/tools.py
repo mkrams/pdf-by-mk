@@ -245,16 +245,27 @@ def execute_tool(tool_name: str, tool_input: dict, job_context: dict) -> str:
         elif tool_name == "submit_changes":
             # Store changes in job context for the orchestrator to pick up
             raw_changes = tool_input.get("changes", [])
+            print(f"[tools] submit_changes: raw_changes type={type(raw_changes).__name__}, len={len(raw_changes) if isinstance(raw_changes, list) else 'N/A'}")
+            if isinstance(raw_changes, list) and len(raw_changes) > 0:
+                print(f"[tools] submit_changes: first item type={type(raw_changes[0]).__name__}, preview={repr(raw_changes[0])[:200]}")
             # Defensive: ensure changes is a list of dicts
             if isinstance(raw_changes, str):
+                print(f"[tools] submit_changes: WARNING changes is a string, parsing")
                 try:
                     raw_changes = json.loads(raw_changes)
                 except (json.JSONDecodeError, TypeError):
                     raw_changes = []
             if not isinstance(raw_changes, list):
+                print(f"[tools] submit_changes: WARNING changes is {type(raw_changes).__name__}, defaulting to []")
                 raw_changes = []
             # Filter out any non-dict items
             validated = [c for c in raw_changes if isinstance(c, dict)]
+            rejected = len(raw_changes) - len(validated)
+            if rejected > 0:
+                print(f"[tools] submit_changes: WARNING rejected {rejected} non-dict items")
+                for i, c in enumerate(raw_changes):
+                    if not isinstance(c, dict):
+                        print(f"[tools] submit_changes: rejected item #{i}: type={type(c).__name__}, value={repr(c)[:100]}")
             job_context["submitted_changes"] = validated
             raw_manifest = tool_input.get("manifest")
             if isinstance(raw_manifest, str):
@@ -263,6 +274,7 @@ def execute_tool(tool_name: str, tool_input: dict, job_context: dict) -> str:
                 except (json.JSONDecodeError, TypeError):
                     raw_manifest = None
             job_context["submitted_manifest"] = raw_manifest
+            print(f"[tools] submit_changes: stored {len(validated)} changes")
             return json.dumps({"status": "submitted", "change_count": len(validated)})
 
         else:

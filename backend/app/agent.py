@@ -87,6 +87,7 @@ async def _call_claude_with_retry(client, model, system, tools, messages, max_to
             last_error = e
             if attempt < MAX_RETRIES - 1:
                 wait = RETRY_BACKOFF[attempt]
+                print(f"[agent] Rate limited, retrying in {wait}s (attempt {attempt+1}/{MAX_RETRIES})")
                 await asyncio.sleep(wait)
             else:
                 raise
@@ -94,6 +95,7 @@ async def _call_claude_with_retry(client, model, system, tools, messages, max_to
             if e.status_code >= 500 and attempt < MAX_RETRIES - 1:
                 last_error = e
                 wait = RETRY_BACKOFF[attempt]
+                print(f"[agent] Server error {e.status_code}, retrying in {wait}s")
                 await asyncio.sleep(wait)
             else:
                 raise
@@ -143,6 +145,7 @@ async def run_analysis(
             ))
 
     await emit("starting", 0, "Starting analysis...", 0)
+    print(f"[job {job_id}] Starting analysis: old='{old_label}', new='{new_label}'")
 
     # Build initial user message
     user_msg = (
@@ -161,6 +164,7 @@ async def run_analysis(
         # Hard timeout check
         if time.time() - start_time > JOB_TIMEOUT_SECONDS:
             await emit("timeout", 80, "Timeout reached — finalizing with current data", turn_num)
+            print(f"[job {job_id}] Timeout at turn {turn_num}")
             break
 
         try:
@@ -184,35 +188,54 @@ async def run_analysis(
         assistant_content = response.content
         messages.append({"role": "assistant", "content": assistant_content})
 
+        # Log what Claude returned
+        block_types = [f"{b.type}({b.name})" if b.type == "tool_use" else b.type for b in assistant_content]
+        print(f"[job {job_id}] Turn {turn_num}: stop={response.stop_reason}, blocks={block_types}")
+
         # Check if there are any tool_use blocks that need responses
         tool_use_blocks = [b for b in assistant_content if b.type == "tool_use"]
 
         if not tool_use_blocks:
             pct = min(85, int(turn_num / MAX_AGENT_TURNS * 85))
             await emit("agent_done", pct, "Agent finished analysis", turn_num)
+            print(f"[job {job_id}] Agent done at turn {turn_num} (no tool_use blocks)")
             break
 
         # Process ALL tool calls and return results together
-        # Run tool execution in a thread to avoid blocking on CPU-bound PDF ops
         tool_results = []
         tool_names = []
         for block in tool_use_blocks:
             tool_name = block.name
             tool_input = block.input
+            tool_names.append(tool_name)
+
+            # Log raw tool_input type for debugging
+            if tool_name == "submit_changes":
+                changes_val = tool_input.get("changes", "MISSING") if isinstance(tool_input, dict) else f"INPUT_NOT_DICT({type(tool_input).__name__})"
+                change_count = len(changes_val) if isinstance(changes_val, list) else str(changes_val)[:100]
+                print(f"[job {job_id}] submit_changes called: input_type={type(tool_input).__name__}, changes={change_count}")
+
             # Defensive: ensure tool_input is a dict
             if isinstance(tool_input, str):
+                print(f"[job {job_id}] WARNING: tool_input for {tool_name} is str, parsing JSON")
                 try:
                     tool_input = json.loads(tool_input)
                 except (json.JSONDecodeError, TypeError):
                     tool_input = {}
             if not isinstance(tool_input, dict):
+                print(f"[job {job_id}] WARNING: tool_input for {tool_name} is {type(tool_input).__name__}, defaulting to empty dict")
                 tool_input = {}
-            tool_names.append(tool_name)
 
             if tool_name == "report_progress":
                 result_str = json.dumps({"status": "reported"})
+            elif tool_name == "submit_changes":
+                # Run submit_changes directly (not in thread) since it just stores data
+                # This avoids any thread-safety concerns with job_context mutation
+                result_str = execute_tool(tool_name, tool_input, job_context)
+                print(f"[job {job_id}] submit_changes result: {result_str}")
+                print(f"[job {job_id}] job_context submitted_changes type={type(job_context.get('submitted_changes')).__name__}, len={len(job_context.get('submitted_changes') or [])}")
             else:
-                # execute_tool is CPU-bound (PDF parsing), run in thread
+                # CPU-bound PDF operations — run in thread
                 result_str = await asyncio.to_thread(
                     execute_tool, tool_name, tool_input, job_context
                 )
@@ -231,28 +254,46 @@ async def run_analysis(
         if tools_str:
             await emit("working", pct, f"Called: {tools_str}", turn_num)
 
-    # Post-process: build annotated PDFs (CPU-bound, run in thread)
+    # Post-process: build annotated PDFs
     await emit("annotating", 88, "Generating annotated PDFs...", MAX_AGENT_TURNS)
 
-    raw_changes = job_context.get("submitted_changes") or []
+    raw_changes = job_context.get("submitted_changes")
     manifest_data = job_context.get("submitted_manifest")
+
+    print(f"[job {job_id}] Post-processing: submitted_changes type={type(raw_changes).__name__}, value={repr(raw_changes)[:300] if raw_changes else 'None'}")
+
+    # Handle case where agent never called submit_changes
+    if raw_changes is None:
+        print(f"[job {job_id}] WARNING: Agent never called submit_changes!")
+        raw_changes = []
 
     # Defensive: ensure changes is a list of dicts
     if isinstance(raw_changes, str):
+        print(f"[job {job_id}] WARNING: submitted_changes is a string, parsing JSON")
         try:
             raw_changes = json.loads(raw_changes)
         except (json.JSONDecodeError, TypeError):
             raw_changes = []
     if not isinstance(raw_changes, list):
+        print(f"[job {job_id}] WARNING: submitted_changes is {type(raw_changes).__name__}, defaulting to []")
         raw_changes = []
-    changes = [c for c in raw_changes if isinstance(c, dict)]
+
+    # Validate each change is a dict
+    changes = []
+    for i, c in enumerate(raw_changes):
+        if isinstance(c, dict):
+            changes.append(c)
+        else:
+            print(f"[job {job_id}] WARNING: change #{i} is {type(c).__name__}, not dict: {repr(c)[:100]}")
+
+    print(f"[job {job_id}] Validated {len(changes)} changes out of {len(raw_changes)} raw items")
 
     # Build annotation data
     old_annotations = []
     new_annotations = []
     for i, c in enumerate(changes):
-        search_old = c.get("search_old") if isinstance(c, dict) else None
-        search_new = c.get("search_new") if isinstance(c, dict) else None
+        search_old = c.get("search_old")
+        search_new = c.get("search_new")
         if search_old:
             old_annotations.append({"change_id": i + 1, "search_text": search_old})
         if search_new:
@@ -275,7 +316,7 @@ async def run_analysis(
     for i, c in enumerate(changes):
         try:
             impact_raw = c.get("impact", "MEDIUM") or "MEDIUM"
-            impact_level = impact_raw.split(" ")[0].split("—")[0].strip()
+            impact_level = impact_raw.split(" ")[0].split("\u2014")[0].strip()
             if impact_level not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
                 impact_level = "MEDIUM"
 
@@ -310,6 +351,8 @@ async def run_analysis(
 
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
+    print(f"[job {job_id}] COMPLETE: {len(final_changes)} changes in {mins}:{secs:02d}, {total_input_tokens + total_output_tokens:,} tokens")
+
     await emit("complete", 100,
         f"Done in {mins}:{secs:02d} — {len(final_changes)} changes, "
         f"{total_input_tokens + total_output_tokens:,} tokens",
