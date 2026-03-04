@@ -125,7 +125,7 @@ async def start_analysis_endpoint(
     }
 
 
-MINI_AGENT_BATCH_SIZE = 3  # How many mini-agents to run in parallel (kept low for Railway memory)
+MINI_AGENT_BATCH_SIZE = 2  # How many mini-agents to run in parallel (kept low for Railway memory)
 
 
 async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):

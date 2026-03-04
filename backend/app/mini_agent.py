@@ -151,8 +151,21 @@ def run_mini_agent(
         if text:
             new_text_parts.append(f"--- NEW Page {page} ---\n{text}")
 
-    old_text_block = "\n\n".join(old_text_parts) if old_text_parts else "(no pages available — use extract_pdf_page to read)"
-    new_text_block = "\n\n".join(new_text_parts) if new_text_parts else "(no pages available — use extract_pdf_page to read)"
+    old_text_block = "\n\n".join(old_text_parts) if old_text_parts else ""
+    new_text_block = "\n\n".join(new_text_parts) if new_text_parts else ""
+
+    # Fall back to diff text previews if page extraction didn't get content
+    old_preview = candidate.get("old_text_preview", "")
+    new_preview = candidate.get("new_text_preview", "")
+    if not old_text_block and old_preview:
+        old_text_block = f"(from diff — first 800 chars of old section)\n{old_preview}"
+    if not new_text_block and new_preview:
+        new_text_block = f"(from diff — first 800 chars of new section)\n{new_preview}"
+
+    if not old_text_block:
+        old_text_block = "(no text available — use extract_pdf_page to read)"
+    if not new_text_block:
+        new_text_block = "(no text available — use extract_pdf_page to read)"
 
     user_msg = (
         f"## Candidate Change: {candidate['section']}\n\n"
@@ -162,10 +175,20 @@ def run_mini_agent(
     if candidate.get("manifest_item"):
         user_msg += f"**Manifest entry**: {candidate['manifest_item']}\n"
 
+    # Always include diff text previews as reference if available
+    if old_preview or new_preview:
+        user_msg += f"\n### Diff Text Comparison (from programmatic diff)\n"
+        if old_preview:
+            user_msg += f"**Old section text (excerpt):**\n{old_preview[:500]}\n\n"
+        if new_preview:
+            user_msg += f"**New section text (excerpt):**\n{new_preview[:500]}\n\n"
+
     user_msg += (
-        f"\n### Old Document Text\n{old_text_block}\n\n"
-        f"### New Document Text\n{new_text_block}\n\n"
-        f"Analyze this change and call save_change with your classification."
+        f"\n### Old Document Full Page Text\n{old_text_block}\n\n"
+        f"### New Document Full Page Text\n{new_text_block}\n\n"
+        f"Analyze this change and call save_change with your classification. "
+        f"The diff has already identified this section as changed — your job is "
+        f"to extract the exact old vs new text and classify the change precisely."
     )
 
     messages = [{"role": "user", "content": user_msg}]

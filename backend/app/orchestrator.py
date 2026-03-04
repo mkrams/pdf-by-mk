@@ -116,7 +116,9 @@ def run_orchestrator(
             "category_hint": diff_type,
             "old_pages": old_pages,
             "new_pages": new_pages,
-            "diff_preview": d.get("diff_preview", "")[:200],
+            "diff_preview": d.get("diff_preview", "")[:300],
+            "old_text_preview": d.get("old_text_preview", "")[:800],
+            "new_text_preview": d.get("new_text_preview", "")[:800],
             "manifest_item": None,
             "similarity": similarity,
         })
@@ -188,7 +190,7 @@ def run_orchestrator(
             print(f"[orchestrator {job_id}] Claude validation failed (non-fatal): {e}")
 
     # Cap candidates to prevent OOM on Railway
-    MAX_CANDIDATES = 60
+    MAX_CANDIDATES = 50
     if len(candidates) > MAX_CANDIDATES:
         print(f"[orchestrator {job_id}] Capping candidates from {len(candidates)} to {MAX_CANDIDATES}")
         # Sort by similarity (lower = more different = more likely a real change)
@@ -298,7 +300,7 @@ def _validate_with_claude(api_key, candidates, manifest, old_structure, new_stru
     )
 
     response = client.messages.create(
-        model="claude-3-5-haiku-20241022",  # Use Haiku for this simple validation
+        model="claude-opus-4-6",  # Opus for best completeness on this critical first pass
         max_tokens=4096,
         messages=[{"role": "user", "content": user_msg}],
         temperature=0,
