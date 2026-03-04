@@ -376,7 +376,7 @@ function ChangeList({
 // Scrolls to and highlights the page containing the selected change.
 
 function PdfPageViewer({
-  jobId, changes, selectedId, onSelect, viewMode, totalPages, navToPage,
+  jobId, changes, selectedId, onSelect, viewMode, totalPages, navToPage, annotated,
 }: {
   jobId: string;
   changes: ChangeItem[];
@@ -385,6 +385,7 @@ function PdfPageViewer({
   viewMode: 'old' | 'new';
   totalPages: number;
   navToPage?: { page: number; ts: number } | null;
+  annotated?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
@@ -527,7 +528,7 @@ function PdfPageViewer({
 
               {/* The actual PDF page image */}
               {shouldLoad ? (
-                <PageImage jobId={jobId} which={viewMode} pageNum={pageNum} />
+                <PageImage jobId={jobId} which={viewMode} pageNum={pageNum} annotated={annotated} />
               ) : (
                 <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm" style={{ height: 800 }}>
                   <div className="flex items-center justify-center h-full text-gray-400 text-xs">
@@ -544,23 +545,24 @@ function PdfPageViewer({
 }
 
 // Single page image component with loading state
-function PageImage({ jobId, which, pageNum }: { jobId: string; which: string; pageNum: number }) {
+function PageImage({ jobId, which, pageNum, annotated }: { jobId: string; which: string; pageNum: number; annotated?: boolean }) {
   const [src, setSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
+  // Re-fetch when `annotated` flips to true (server cleared cache, annotated PDF now available)
   useEffect(() => {
     setLoading(true);
     setError(false);
-    const url = `${API}/api/analyze/${jobId}/page/${which}/${pageNum}`;
-    // Use fetch to load as blob for better caching control
+    const cacheBust = annotated ? '?v=annotated' : '';
+    const url = `${API}/api/analyze/${jobId}/page/${which}/${pageNum}${cacheBust}`;
     fetch(url)
       .then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.blob();
       })
       .then(blob => {
-        setSrc(URL.createObjectURL(blob));
+        setSrc(prev => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(blob); });
         setLoading(false);
       })
       .catch(() => {
@@ -571,7 +573,7 @@ function PageImage({ jobId, which, pageNum }: { jobId: string; which: string; pa
     return () => {
       if (src) URL.revokeObjectURL(src);
     };
-  }, [jobId, which, pageNum]);
+  }, [jobId, which, pageNum, annotated]);
 
   if (loading) {
     return (
@@ -834,6 +836,7 @@ export default function ViewerPage() {
               viewMode={viewMode}
               totalPages={totalPages}
               navToPage={navToPage}
+              annotated={!!result}
             />
           </div>
         </div>

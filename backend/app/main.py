@@ -327,11 +327,21 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
         old_ann_path = os.path.join(job_dir, "old_annotated.pdf")
         new_ann_path = os.path.join(job_dir, "new_annotated.pdf")
 
+        print(f"[job {job_id}] Annotating: {len(old_annotations)} old + {len(new_annotations)} new search texts")
+        for ann in old_annotations[:5]:
+            print(f"  old #{ann['change_id']}: '{ann['search_text'][:60]}...'")
+        for ann in new_annotations[:5]:
+            print(f"  new #{ann['change_id']}: '{ann['search_text'][:60]}...'")
+
         old_ann_result = await asyncio.to_thread(annotate_pdf, old_path, old_ann_path, old_annotations)
         new_ann_result = await asyncio.to_thread(annotate_pdf, new_path, new_ann_path, new_annotations)
 
         print(f"[job {job_id}] Annotation: {old_ann_result['highlights']} old + "
               f"{new_ann_result['highlights']} new highlights")
+
+        # Clear page image cache so frontend gets annotated (highlighted) pages
+        _page_cache.pop(job_id, None)
+        print(f"[job {job_id}] Page image cache cleared for re-render with annotations")
 
         # ── BUILD FINAL RESULT ─────────────────────────────────────────
         final_changes = []
@@ -341,6 +351,10 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
             impact_level = impact_raw.split(" ")[0].split("—")[0].strip().upper()
             if impact_level not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
                 impact_level = "MEDIUM"
+
+            # Use annotation page if found, fall back to candidate approximate page
+            old_page = old_ann_result["page_map"].get(cid) or c.get("old_page")
+            new_page = new_ann_result["page_map"].get(cid) or c.get("new_page")
 
             final_changes.append(ChangeItem(
                 id=cid,
@@ -356,8 +370,8 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
                 verification_status=c.get("verification_status"),
                 verification_conclusion=c.get("verification_conclusion"),
                 verification_keywords=c.get("verification_keywords", []),
-                old_page=old_ann_result["page_map"].get(cid),
-                new_page=new_ann_result["page_map"].get(cid),
+                old_page=old_page,
+                new_page=new_page,
             ))
 
         by_category = {}
