@@ -33,6 +33,11 @@ list, cross-check it against the manifest and add any missing items.
 - Use detect_document_structure and detect_revision_history first.
 - Use diff_sections for systematic comparison.
 - You have a MAXIMUM of 20 turns. Be thorough within this budget.
+- **Adaptive page batching**: Adjust how many pages you read per turn based on content \
+complexity. For simple/boilerplate sections (formatting, headers, editorial changes), \
+batch 8-12 pages per turn. For dense/complex content (tables with data, sections \
+flagged in the manifest, numerical specifications), read only 2-4 pages per turn so \
+you can analyze carefully. Re-evaluate after each turn based on what you found.
 - Report progress every 2-3 tool calls.
 
 ## Process
@@ -42,9 +47,9 @@ both PDFs + detect_revision_history on BOTH PDFs — all in one turn.
 
 2. **Diff**: Run diff_sections to get all section-level changes.
 
-3. **Read targeted pages**: Read pages where diffs were found AND pages containing \
-every item mentioned in the manifest. Pay special attention to Tables — read the \
-full pages for every table mentioned in the manifest.
+3. **Read targeted pages** (use adaptive batching): Read pages where diffs were found \
+AND pages containing every item mentioned in the manifest. Batch aggressively for \
+boilerplate sections, slow down for tables and manifest-flagged content.
 
 4. **Classify each change**: category (NEW/MODIFIED/REMOVED/STRUCTURAL), \
 title, description, old_text, new_text, impact.
@@ -93,18 +98,20 @@ def _describe_tools(tool_names: list[str], blocks: list) -> str:
         if name == "extract_pdf_text":
             parts.append("Reading full document text" if n == 1 else "Reading both documents")
         elif name == "extract_pdf_page":
-            if n == 1:
-                # Try to get page number from block input
-                for b in blocks:
-                    if b.name == "extract_pdf_page" and isinstance(b.input, dict):
-                        pg = b.input.get("page_number", "?")
-                        which = b.input.get("pdf_id", "")
-                        parts.append(f"Reading page {pg} of {which} document")
-                        break
+            # Collect page details from blocks
+            page_refs = []
+            for b in blocks:
+                if b.name == "extract_pdf_page" and isinstance(b.input, dict):
+                    pg = b.input.get("page_number", "?")
+                    which = b.input.get("pdf_id", "")
+                    page_refs.append(f"p{pg} ({which})")
+            if page_refs:
+                if len(page_refs) <= 3:
+                    parts.append(f"Reading {', '.join(page_refs)}")
                 else:
-                    parts.append("Reading a specific page")
+                    parts.append(f"Deep-reading {n} pages: {', '.join(page_refs[:3])}...")
             else:
-                parts.append(f"Deep-reading {n} pages for details")
+                parts.append(f"Reading {n} page(s)")
         elif name == "detect_document_structure":
             parts.append("Mapping document structure" if n == 1 else "Mapping both document structures")
         elif name == "detect_revision_history":
