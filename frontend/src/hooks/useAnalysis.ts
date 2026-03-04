@@ -12,6 +12,7 @@ export function useAnalysis(jobId: string | null) {
   const [pageCounts, setPageCounts] = useState<{ old: number; new: number }>({ old: 0, new: 0 });
   const [candidates, setCandidates] = useState<CandidateSummary[]>([]);
   const [analyzedCandidateIds, setAnalyzedCandidateIds] = useState<Set<string>>(new Set());
+  const [rejectedCandidateIds, setRejectedCandidateIds] = useState<Set<string>>(new Set());
   const [analysisProgress, setAnalysisProgress] = useState<{ analyzed: number; total: number }>({ analyzed: 0, total: 0 });
   const [activeCandidateId, setActiveCandidateId] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
@@ -105,6 +106,9 @@ export function useAnalysis(jobId: string | null) {
         try {
           const data = JSON.parse(e.data);
           setAnalyzedCandidateIds(prev => new Set([...prev, data.candidate_id]));
+          if (!data.had_change) {
+            setRejectedCandidateIds(prev => new Set([...prev, data.candidate_id]));
+          }
           setAnalysisProgress({ analyzed: data.analyzed_count || 0, total: data.total_candidates || 0 });
         } catch {}
       });
@@ -187,7 +191,7 @@ export function useAnalysis(jobId: string | null) {
     };
   }, [jobId, fetchResult]);
 
-  return { progress, streamingChanges, result, isComplete, error, pageCounts, candidates, analyzedCandidateIds, analysisProgress, activeCandidateId };
+  return { progress, streamingChanges, result, isComplete, error, pageCounts, candidates, analyzedCandidateIds, rejectedCandidateIds, analysisProgress, activeCandidateId };
 }
 
 export async function startAnalysis(

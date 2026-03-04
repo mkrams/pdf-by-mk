@@ -281,12 +281,18 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
                     if result.get("error"):
                         print(f"[job {job_id}] Mini-agent {result['agent_id']} error: {result['error']}")
 
+                # Determine if this candidate produced a change or was rejected
+                had_change = False
+                if not isinstance(result, Exception) and result and result.get("change"):
+                    had_change = True
+
                 # Notify frontend this candidate was analyzed
                 analyzed_count = batch_num * MINI_AGENT_BATCH_SIZE + i + 1
                 if job_id in progress_queues:
                     progress_queues[job_id].put({
                         "event_type": "candidate_analyzed",
                         "candidate_id": cand_id,
+                        "had_change": had_change,
                         "analyzed_count": min(analyzed_count, len(candidates)),
                         "total_candidates": len(candidates),
                     })
@@ -501,7 +507,7 @@ async def stream_progress(job_id: str):
                 yield f"event: candidate_started\ndata: {json.dumps({'candidate_id': event.get('candidate_id'), 'candidate_title': event.get('candidate_title', '')})}\n\n"
             elif event_type == "candidate_analyzed":
                 # Notify which candidate was just analyzed
-                yield f"event: candidate_analyzed\ndata: {json.dumps({'candidate_id': event.get('candidate_id'), 'analyzed_count': event.get('analyzed_count', 0), 'total_candidates': event.get('total_candidates', 0)})}\n\n"
+                yield f"event: candidate_analyzed\ndata: {json.dumps({'candidate_id': event.get('candidate_id'), 'had_change': event.get('had_change', False), 'analyzed_count': event.get('analyzed_count', 0), 'total_candidates': event.get('total_candidates', 0)})}\n\n"
             elif stage == "complete":
                 yield f"event: complete\ndata: {json.dumps(event)}\n\n"
                 break

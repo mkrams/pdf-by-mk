@@ -193,7 +193,7 @@ function Spinner() {
 
 function ChangeList({
   changes, selectedId, onSelect, search, onSearch, catFilter, onCatFilter,
-  candidates, analyzedCandidateIds, isAnalyzing, analysisProgress, activeCandidateId,
+  candidates, analyzedCandidateIds, rejectedCandidateIds, isAnalyzing, analysisProgress, activeCandidateId,
 }: {
   changes: ChangeItem[];
   selectedId: number | null;
@@ -202,6 +202,7 @@ function ChangeList({
   catFilter: string; onCatFilter: (s: string) => void;
   candidates: CandidateSummary[];
   analyzedCandidateIds: Set<string>;
+  rejectedCandidateIds: Set<string>;
   isAnalyzing: boolean;
   analysisProgress: { analyzed: number; total: number };
   activeCandidateId: string | null;
@@ -214,25 +215,12 @@ function ChangeList({
     return true;
   }), [changes, catFilter, search]);
 
-  // Build set of candidate IDs that resulted in confirmed changes
-  // We match by checking if any change's section matches the candidate's section
-  const confirmedCandidateIds = useMemo(() => {
-    const changeSections = new Set(changes.map(c => c.section));
-    const confirmed = new Set<string>();
-    for (const cand of candidates) {
-      if (changeSections.has(cand.section)) confirmed.add(cand.id);
-    }
-    return confirmed;
-  }, [changes, candidates]);
+  // Accepted = analyzed minus rejected
+  const acceptedCount = useMemo(() => {
+    return analysisProgress.analyzed - rejectedCandidateIds.size;
+  }, [analysisProgress.analyzed, rejectedCandidateIds]);
 
-  // Rejected = analyzed but not confirmed
-  const rejectedCount = useMemo(() => {
-    let count = 0;
-    analyzedCandidateIds.forEach(id => {
-      if (!confirmedCandidateIds.has(id)) count++;
-    });
-    return count;
-  }, [analyzedCandidateIds, confirmedCandidateIds]);
+  const rejectedCount = rejectedCandidateIds.size;
 
   // Pending candidates = not yet analyzed
   const pendingCandidates = useMemo(() => {
@@ -247,12 +235,11 @@ function ChangeList({
   // Analyzed but no change found (rejected)
   const noChangeCandidates = useMemo(() => {
     return candidates.filter(c => {
-      if (!analyzedCandidateIds.has(c.id)) return false;
-      if (confirmedCandidateIds.has(c.id)) return false;
+      if (!rejectedCandidateIds.has(c.id)) return false;
       if (search && !`${c.title} ${c.section}`.toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     });
-  }, [candidates, analyzedCandidateIds, confirmedCandidateIds, search]);
+  }, [candidates, rejectedCandidateIds, search]);
 
   return (
     <div className="w-72 min-w-[260px] border-r border-gray-200 dark:border-gray-700 flex flex-col bg-white dark:bg-gray-900 shrink-0">
@@ -276,7 +263,7 @@ function ChangeList({
           <div className="flex gap-3 text-[10px]">
             <span className="flex items-center gap-1 text-green-600 dark:text-green-400 font-medium">
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500" />
-              {changes.length} accepted
+              {acceptedCount} accepted
             </span>
             <span className="flex items-center gap-1 text-red-400 dark:text-red-500 font-medium">
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-400" />
@@ -616,7 +603,7 @@ function PageImage({ jobId, which, pageNum, annotated }: { jobId: string; which:
 
 export default function ViewerPage() {
   const { jobId } = useParams<{ jobId: string }>();
-  const { progress, streamingChanges, result, isComplete, error, pageCounts, candidates, analyzedCandidateIds, analysisProgress, activeCandidateId } = useAnalysis(jobId || null);
+  const { progress, streamingChanges, result, isComplete, error, pageCounts, candidates, analyzedCandidateIds, rejectedCandidateIds, analysisProgress, activeCandidateId } = useAnalysis(jobId || null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
 
@@ -738,6 +725,7 @@ export default function ViewerPage() {
             catFilter={catFilter} onCatFilter={setCatFilter}
             candidates={candidates}
             analyzedCandidateIds={analyzedCandidateIds}
+            rejectedCandidateIds={rejectedCandidateIds}
             isAnalyzing={isAnalyzing}
             analysisProgress={analysisProgress}
             activeCandidateId={activeCandidateId}
