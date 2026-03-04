@@ -4,6 +4,7 @@ FastAPI application: upload, SSE progress, results, and PDF download endpoints.
 import asyncio
 import json
 import os
+import queue as thread_queue  # thread-safe queue
 import shutil
 import uuid
 import time
@@ -13,7 +14,7 @@ from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 
 from .config import CORS_ORIGINS, UPLOAD_DIR, MAX_FILE_SIZE, JOB_EXPIRY_SECONDS
 from .agent import run_analysis
@@ -33,7 +34,8 @@ app.add_middleware(
 # ── JOB STORAGE (in-memory) ────────────────────────────────────────
 
 jobs: dict = {}
-progress_queues: dict[str, asyncio.Queue] = {}
+# Thread-safe queues — can be written from worker threads, read from async SSE
+progress_queues: dict[str, thread_queue.Queue] = {}
 
 
 def cleanup_old_jobs():
@@ -109,9 +111,9 @@ async def start_analysis_endpoint(
         "error": None,
     }
 
-    progress_queues[job_id] = asyncio.Queue()
+    progress_queues[job_id] = thread_queue.Queue()
 
-    # Start analysis in background — runs in the main event loop (no thread)
+    # Start analysis in background thread
     asyncio.create_task(_run_job(job_id, old_path, new_path, old_label, new_label, api_key or ""))
 
     return {
@@ -122,23 +124,27 @@ async def start_analysis_endpoint(
 
 
 async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
-    """Background task for running the analysis."""
-    async def progress_cb(event: ProgressEvent):
+    """Run analysis in a worker thread so it doesn't block the event loop."""
+
+    def progress_cb(event: ProgressEvent):
+        """SYNC callback — called from the worker thread."""
         event_dict = event.model_dump()
         jobs[job_id]["progress"].append(event_dict)
         if job_id in progress_queues:
-            await progress_queues[job_id].put(event_dict)
+            progress_queues[job_id].put(event_dict)
 
     try:
-        result = await run_analysis(
-            job_id, old_path, new_path, old_label, new_label, api_key, progress_cb
+        # run_analysis is SYNC (blocking) — run it in a thread
+        result = await asyncio.to_thread(
+            run_analysis,
+            job_id, old_path, new_path, old_label, new_label, api_key, progress_cb,
         )
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["result"] = result
 
         # Signal completion through queue
         if job_id in progress_queues:
-            await progress_queues[job_id].put({
+            progress_queues[job_id].put({
                 "stage": "complete", "percent": 100,
                 "message": f"Analysis complete: {result['total_changes']} changes found",
             })
@@ -149,7 +155,7 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = error_msg
         if job_id in progress_queues:
-            await progress_queues[job_id].put({
+            progress_queues[job_id].put({
                 "stage": "failed", "percent": 0, "message": error_msg,
             })
 
@@ -161,7 +167,7 @@ async def stream_progress(job_id: str):
         raise HTTPException(404, "Job not found")
 
     async def event_generator():
-        # Send existing progress first
+        # Send existing progress first (catch-up for late SSE connections)
         for event in jobs[job_id].get("progress", []):
             yield f"event: progress\ndata: {json.dumps(event)}\n\n"
 
@@ -175,27 +181,17 @@ async def stream_progress(job_id: str):
             yield f"event: failed\ndata: {json.dumps({'status': 'failed', 'error': jobs[job_id].get('error', 'Unknown error')})}\n\n"
             return
 
-        # Listen for new events
-        queue = progress_queues.get(job_id)
-        if not queue:
+        # Stream new events from the thread-safe queue
+        q = progress_queues.get(job_id)
+        if not q:
             return
 
         while True:
+            # Poll the thread-safe queue without blocking the event loop
             try:
-                event = await asyncio.wait_for(queue.get(), timeout=30)
-                stage = event.get("stage", "")
-                if stage == "complete":
-                    yield f"event: complete\ndata: {json.dumps(event)}\n\n"
-                    break
-                elif stage == "failed":
-                    yield f"event: failed\ndata: {json.dumps(event)}\n\n"
-                    break
-                else:
-                    yield f"event: progress\ndata: {json.dumps(event)}\n\n"
-            except asyncio.TimeoutError:
-                # Send keepalive comment (not an event)
-                yield f": keepalive\n\n"
-                # Check if job finished while we were waiting
+                event = q.get_nowait()
+            except thread_queue.Empty:
+                # No new events — check if job finished
                 if jobs[job_id]["status"] in ("completed", "failed"):
                     status = jobs[job_id]["status"]
                     if status == "completed":
@@ -204,6 +200,20 @@ async def stream_progress(job_id: str):
                     else:
                         yield f"event: failed\ndata: {json.dumps({'status': 'failed', 'error': jobs[job_id].get('error', '')})}\n\n"
                     break
+                # Wait a bit before polling again
+                await asyncio.sleep(0.5)
+                continue
+
+            # Got an event from the queue
+            stage = event.get("stage", "")
+            if stage == "complete":
+                yield f"event: complete\ndata: {json.dumps(event)}\n\n"
+                break
+            elif stage == "failed":
+                yield f"event: failed\ndata: {json.dumps(event)}\n\n"
+                break
+            else:
+                yield f"event: progress\ndata: {json.dumps(event)}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -267,7 +277,6 @@ async def serve_pdf(job_id: str, which: str):
     if not path or not os.path.exists(path):
         raise HTTPException(404, "Annotated PDF not found")
 
-    # Read file and return with inline Content-Disposition
     with open(path, "rb") as f:
         pdf_bytes = f.read()
 

@@ -289,7 +289,30 @@ function PdfViewer({
   page: number | null;
   onTabChange: (tab: 'old' | 'new') => void;
 }) {
-  const url = getPdfUrl(jobId, activeTab) + (page ? `#page=${page}` : '');
+  const iframeRef = React.useRef<HTMLIFrameElement>(null);
+  const baseUrl = getPdfUrl(jobId, activeTab);
+
+  // Navigate to page within already-loaded PDF (no reload)
+  useEffect(() => {
+    if (page && iframeRef.current) {
+      try {
+        // Try postMessage for PDF viewers that support it
+        iframeRef.current.contentWindow?.postMessage(
+          { type: 'page', page }, '*'
+        );
+        // Fallback: update the hash (works in most browser PDF viewers)
+        const currentSrc = iframeRef.current.src || '';
+        const hashlessUrl = currentSrc.split('#')[0];
+        const newUrl = `${hashlessUrl}#page=${page}`;
+        if (iframeRef.current.src !== newUrl) {
+          iframeRef.current.src = newUrl;
+        }
+      } catch {
+        // Cross-origin — can't access contentWindow
+      }
+    }
+  }, [page]);
+
   return (
     <div className="w-[420px] min-w-[300px] flex flex-col border-l border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900">
       <div className="flex border-b border-gray-200 dark:border-gray-700">
@@ -301,7 +324,9 @@ function PdfViewer({
           </button>
         ))}
       </div>
-      <iframe key={url} src={url} className="flex-1 border-0 w-full" title="PDF Viewer" />
+      {/* key={baseUrl} — only reloads when switching old/new tab, NOT on page change */}
+      <iframe ref={iframeRef} key={baseUrl} src={baseUrl + (page ? `#page=${page}` : '')}
+        className="flex-1 border-0 w-full" title="PDF Viewer" />
     </div>
   );
 }
