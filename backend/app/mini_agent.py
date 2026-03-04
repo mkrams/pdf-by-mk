@@ -18,20 +18,40 @@ You are analyzing a single document change between an old and new PDF version.
 You will receive the relevant page text from both documents and a description
 of what changed.
 
+IMPORTANT: The orchestrator has already identified this as a candidate change via
+programmatic diff. Your job is to classify and describe it — NOT to second-guess
+whether it's real. The diff found a difference, so there almost certainly IS one.
+
+When in doubt, ALWAYS save the change. It is far better to report a minor change
+than to miss a real one. Only use FALSE_POSITIVE if you are 100% certain that the
+old and new text are completely identical with zero differences whatsoever.
+
 Your job:
 1. Read the provided page text carefully
 2. Identify the exact change (what was there before vs what is there now)
 3. Classify it precisely
 4. Call save_change with the complete analysis
 
+Categories:
+- NEW: content that exists in the new document but not the old
+- MODIFIED: content that was changed between versions
+- REMOVED: content that existed in the old document but not the new
+- STRUCTURAL: changes to document structure (section numbering, ordering, layout)
+- FORMATTING: changes that are purely formatting (whitespace, line breaks, font,
+  capitalization, punctuation style) with no substantive content difference.
+  Still save these — the user wants to see them, just labeled differently.
+- FALSE_POSITIVE: ONLY use this if you are 100% certain the text is completely
+  identical in both versions. This should be extremely rare.
+
 Required fields for save_change:
 - section: the section/table/appendix reference (e.g., "2.3", "Table 3")
 - title: brief human-readable title (e.g., "Updated test frequency requirement")
-- category: NEW, MODIFIED, REMOVED, or STRUCTURAL
+- category: one of NEW, MODIFIED, REMOVED, STRUCTURAL, FORMATTING, FALSE_POSITIVE
 - description: 1-2 sentence explanation of what changed and why it matters
 - old_text: exact quote from old document (max 300 chars). Use "" if NEW.
 - new_text: exact quote from new document (max 300 chars). Use "" if REMOVED.
 - impact: "LEVEL — explanation" where LEVEL is CRITICAL/HIGH/MEDIUM/LOW
+  (FORMATTING changes should typically be LOW)
 - search_old: short unique snippet (10-40 chars) to find in old PDF for annotation
 - search_new: short unique snippet (10-40 chars) to find in new PDF for annotation
 - verification_status: "verified" or "needs_review"
@@ -40,9 +60,6 @@ Required fields for save_change:
 
 Be precise with old_text and new_text — these are shown to the user for comparison.
 The search_old and search_new snippets must be unique enough to find the right location.
-
-If the page text doesn't contain a real change (false positive), call save_change
-with category "FALSE_POSITIVE" and it will be filtered out.
 """
 
 MINI_AGENT_TOOLS = [
@@ -84,7 +101,7 @@ MINI_AGENT_TOOLS = [
                 "title": {"type": "string"},
                 "category": {
                     "type": "string",
-                    "enum": ["NEW", "MODIFIED", "REMOVED", "STRUCTURAL", "FALSE_POSITIVE"],
+                    "enum": ["NEW", "MODIFIED", "REMOVED", "STRUCTURAL", "FORMATTING", "FALSE_POSITIVE"],
                 },
                 "description": {"type": "string"},
                 "old_text": {"type": "string", "default": ""},
@@ -187,8 +204,9 @@ def run_mini_agent(
         f"\n### Old Document Full Page Text\n{old_text_block}\n\n"
         f"### New Document Full Page Text\n{new_text_block}\n\n"
         f"Analyze this change and call save_change with your classification. "
-        f"The diff has already identified this section as changed — your job is "
-        f"to extract the exact old vs new text and classify the change precisely."
+        f"The diff has already confirmed this section differs — save the change. "
+        f"Use FORMATTING category if it's only whitespace/punctuation/layout. "
+        f"Only use FALSE_POSITIVE if old and new text are 100% identical."
     )
 
     messages = [{"role": "user", "content": user_msg}]

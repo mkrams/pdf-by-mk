@@ -12,12 +12,14 @@ const CAT_COLORS: Record<string, string> = {
   MODIFIED: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
   REMOVED: 'bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300',
   STRUCTURAL: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
+  FORMATTING: 'bg-yellow-50 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400',
 };
 const CAT_BORDER: Record<string, string> = {
   NEW: 'border-orange-400',
   MODIFIED: 'border-blue-400',
   REMOVED: 'border-gray-400',
   STRUCTURAL: 'border-purple-400',
+  FORMATTING: 'border-yellow-300',
 };
 
 function Badge({ text, colors }: { text: string; colors: string }) {
@@ -301,20 +303,24 @@ function ChangeList({
       </div>
       <div className="flex-1 overflow-y-auto">
         {/* Confirmed changes */}
-        {filtered.map(c => (
-          <div key={c.id} onClick={() => onSelect(c.id)}
-            className={`px-3 py-2 border-b border-gray-100 dark:border-gray-800 cursor-pointer transition-colors
-              ${c.id === selectedId ? 'bg-blue-50 dark:bg-blue-900/30 border-l-[3px] border-l-blue-500' : 'hover:bg-gray-50 dark:hover:bg-gray-800'}`}>
-            <div className="flex items-start gap-1.5">
-              <span className="text-[10px] font-bold text-gray-400 mt-0.5">#{c.id}</span>
-              <span className="text-xs font-medium text-gray-800 dark:text-gray-200 leading-tight">{c.title}</span>
+        {filtered.map(c => {
+          const isFormatting = c.category === 'FORMATTING';
+          return (
+            <div key={c.id} onClick={() => onSelect(c.id)}
+              className={`px-3 py-2 border-b border-gray-100 dark:border-gray-800 cursor-pointer transition-colors
+                ${c.id === selectedId ? 'bg-blue-50 dark:bg-blue-900/30 border-l-[3px] border-l-blue-500' : 'hover:bg-gray-50 dark:hover:bg-gray-800'}
+                ${isFormatting && c.id !== selectedId ? 'opacity-50' : ''}`}>
+              <div className="flex items-start gap-1.5">
+                <span className="text-[10px] font-bold text-gray-400 mt-0.5">#{c.id}</span>
+                <span className={`text-xs font-medium leading-tight ${isFormatting ? 'text-gray-500 dark:text-gray-500 italic' : 'text-gray-800 dark:text-gray-200'}`}>{c.title}</span>
+              </div>
+              <div className="flex gap-1 mt-1">
+                <Badge text={c.category} colors={CAT_COLORS[c.category] || ''} />
+                <span className="text-[10px] text-gray-400">{'\u00A7'}{c.section}</span>
+              </div>
             </div>
-            <div className="flex gap-1 mt-1">
-              <Badge text={c.category} colors={CAT_COLORS[c.category] || ''} />
-              <span className="text-[10px] text-gray-400">{'\u00A7'}{c.section}</span>
-            </div>
-          </div>
-        ))}
+          );
+        })}
 
         {/* Pending candidates (not yet analyzed) — active one has spinner */}
         {pendingCandidates.map(c => {

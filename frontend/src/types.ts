@@ -2,7 +2,7 @@ export interface ChangeItem {
   id: number;
   section: string;
   title: string;
-  category: 'NEW' | 'MODIFIED' | 'REMOVED' | 'STRUCTURAL';
+  category: 'NEW' | 'MODIFIED' | 'REMOVED' | 'STRUCTURAL' | 'FORMATTING';
   description: string;
   old_text?: string | null;
   new_text?: string | null;

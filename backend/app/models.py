@@ -7,7 +7,7 @@ class ChangeItem(BaseModel):
     id: int
     section: str
     title: str
-    category: str  # NEW, MODIFIED, REMOVED, STRUCTURAL
+    category: str  # NEW, MODIFIED, REMOVED, STRUCTURAL, FORMATTING
     description: str
     old_text: Optional[str] = None
     new_text: Optional[str] = None
