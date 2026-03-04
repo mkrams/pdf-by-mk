@@ -301,7 +301,7 @@ export default function UploadPage() {
                   : 'linear-gradient(135deg, #ff2d95 0%, #d926ff 50%, #00e5ff 100%)',
                 boxShadow: (loading || !oldFile || !newFile) ? 'none' : '0 0 30px rgba(255,45,149,0.4), 0 0 60px rgba(0,229,255,0.2)',
               }}>
-              {loading ? 'Firing up the engine...' : 'Analyze Changes'}
+              {loading ? 'Bless these PDFs with AI magic...' : 'Analyze Changes'}
             </button>
           </form>
 
