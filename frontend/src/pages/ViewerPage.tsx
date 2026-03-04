@@ -787,6 +787,16 @@ export default function ViewerPage() {
                     {selectedChange.new_text || <em className="text-gray-400">[Not applicable]</em>}
                   </div>
                 </div>
+
+                {/* Annotation notice during analysis */}
+                {isAnalyzing && (
+                  <div className="text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2 mb-3 flex items-start gap-2">
+                    <span className="mt-0.5 shrink-0">{'\u2139'}</span>
+                    <span>
+                      Page locations are approximate during analysis. PDF highlights and exact page annotations will be applied when all candidates are processed.
+                    </span>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="flex-1 flex items-center justify-center h-full text-gray-400 dark:text-gray-600">
