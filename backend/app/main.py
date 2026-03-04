@@ -125,7 +125,7 @@ async def start_analysis_endpoint(
     }
 
 
-MINI_AGENT_BATCH_SIZE = 5  # How many mini-agents to run in parallel
+MINI_AGENT_BATCH_SIZE = 3  # How many mini-agents to run in parallel (kept low for Railway memory)
 
 
 async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
@@ -235,6 +235,13 @@ async def _run_job(job_id, old_path, new_path, old_label, new_label, api_key):
                 total_tokens += result.get("tokens_used", 0)
                 if result.get("error"):
                     print(f"[job {job_id}] Mini-agent {result['agent_id']} error: {result['error']}")
+
+            # Free page cache entries consumed by this batch to reduce memory
+            for cand in batch:
+                for p in cand.get("old_pages", []):
+                    page_cache.pop(("old", p), None)
+                for p in cand.get("new_pages", []):
+                    page_cache.pop(("new", p), None)
 
             print(f"[job {job_id}] Batch {batch_num + 1}/{len(batches)} done. "
                   f"Changes so far: {len(all_changes)}")

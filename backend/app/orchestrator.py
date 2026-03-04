@@ -94,9 +94,16 @@ def run_orchestrator(
     emit("orchestrator", 13, f"Building candidates from {len(diffs)} diffs...")
 
     candidates = []
+    skipped_high_sim = 0
     for i, d in enumerate(diffs):
         section = d.get("old_section") or d.get("new_section") or f"unknown_{i}"
         diff_type = d.get("type", "MODIFIED")
+
+        # Skip near-identical sections (similarity > 0.95 = likely no real change)
+        similarity = d.get("similarity")
+        if similarity is not None and similarity > 0.95 and diff_type == "MODIFIED":
+            skipped_high_sim += 1
+            continue
 
         # Determine pages to read
         old_pages = _find_pages_for_section(section, old_structure)
@@ -111,17 +118,33 @@ def run_orchestrator(
             "new_pages": new_pages,
             "diff_preview": d.get("diff_preview", "")[:200],
             "manifest_item": None,
-            "similarity": d.get("similarity"),
+            "similarity": similarity,
         })
+
+    if skipped_high_sim:
+        print(f"[orchestrator {job_id}] Skipped {skipped_high_sim} near-identical sections (>95% similar)")
 
     # ── Step 3: Cross-check manifest ────────────────────────────────
     if manifest_items:
         emit("orchestrator", 15, "Cross-checking manifest coverage...")
         covered_sections = {_normalize_section_ref(c["section"]) for c in candidates}
 
+        def _is_covered(ref_norm: str) -> bool:
+            """Check if a manifest ref is already covered by an existing candidate.
+            Handles partial matches: manifest '2' covers diff '2.1', and vice versa."""
+            if ref_norm in covered_sections:
+                return True
+            for cs in covered_sections:
+                # '2.1' starts with '2' or '2' starts with '2.1'
+                if cs.startswith(ref_norm + ".") or ref_norm.startswith(cs + "."):
+                    return True
+                if cs == ref_norm:
+                    return True
+            return False
+
         for item in manifest_items:
             ref_norm = _normalize_section_ref(item["ref"])
-            if ref_norm not in covered_sections:
+            if not _is_covered(ref_norm):
                 # Manifest item not covered by diff — create synthetic candidate
                 section_ref = item["ref"]
                 action = item["action"]
@@ -163,6 +186,14 @@ def run_orchestrator(
                 print(f"[orchestrator {job_id}] AI added candidate: {extra['section']}")
         except Exception as e:
             print(f"[orchestrator {job_id}] Claude validation failed (non-fatal): {e}")
+
+    # Cap candidates to prevent OOM on Railway
+    MAX_CANDIDATES = 60
+    if len(candidates) > MAX_CANDIDATES:
+        print(f"[orchestrator {job_id}] Capping candidates from {len(candidates)} to {MAX_CANDIDATES}")
+        # Sort by similarity (lower = more different = more likely a real change)
+        candidates.sort(key=lambda c: c.get("similarity") or 0.5)
+        candidates = candidates[:MAX_CANDIDATES]
 
     print(f"[orchestrator {job_id}] Total candidates: {len(candidates)}")
 
@@ -231,10 +262,21 @@ def _find_pages_for_section(section_ref: str, structure: dict) -> list[int]:
 
 
 def _normalize_section_ref(ref: str) -> str:
-    """Normalize section reference for comparison."""
+    """
+    Normalize section reference for comparison.
+    Extracts the leading numeric/dotted pattern (e.g., "2.3.1") to match
+    regardless of trailing title text, punctuation, or formatting differences.
+    """
     ref = ref.lower().strip().rstrip(".:;")
-    # Remove extra spaces
     ref = re.sub(r'\s+', ' ', ref)
+
+    # Extract leading section number like "2.3", "A.1", "Table 3", etc.
+    num_match = re.match(r'^((?:table|appendix|annex|figure|fig)\s*)?(\d[\d.]*[a-z]?)', ref)
+    if num_match:
+        prefix = (num_match.group(1) or "").strip()
+        number = num_match.group(2).rstrip(".")
+        return f"{prefix} {number}".strip() if prefix else number
+
     return ref
 
 
@@ -256,7 +298,7 @@ def _validate_with_claude(api_key, candidates, manifest, old_structure, new_stru
     )
 
     response = client.messages.create(
-        model="claude-haiku-3-5-20241022",  # Use Haiku for this simple validation
+        model="claude-3-5-haiku-20241022",  # Use Haiku for this simple validation
         max_tokens=4096,
         messages=[{"role": "user", "content": user_msg}],
         temperature=0,
